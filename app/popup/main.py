@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import threading
+from math import pi
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,7 +16,7 @@ import gi
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, GdkPixbuf, Gtk  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
 
 try:
     gi.require_version("GtkLayerShell", "0.1")
@@ -21,12 +25,13 @@ except (ImportError, ValueError):
     GtkLayerShell = None
 
 
-POPUP_WIDTH = 460
+POPUP_WIDTH = 250
 POPUP_HEIGHT = 96
 POPUP_MARGIN_BOTTOM = 24
-AVATAR_SIZE = 72
+POPUP_RADIUS = 16
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AVATAR_SVG = REPO_ROOT / "assets" / "Q19WSHi0PH.svg"
+AVATAR_VIDEO = REPO_ROOT / "assets" / "110371-688648556_medium.mp4"
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ def get_runtime_info() -> RuntimeInfo:
 class NixiPopup:
     def __init__(self) -> None:
         self.runtime = get_runtime_info()
+        self.video: LoopingVideo | None = None
         self.window = self._build_window()
 
     def open(self) -> None:
@@ -61,6 +67,8 @@ class NixiPopup:
             self._position_fallback_window()
 
     def close(self) -> None:
+        if self.video is not None:
+            self.video.stop()
         self.window.hide()
         Gtk.main_quit()
 
@@ -90,56 +98,29 @@ class NixiPopup:
         return window
 
     def _build_content(self) -> Gtk.Widget:
-        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        card.get_style_context().add_class("nixi-card")
-        card.set_size_request(POPUP_WIDTH, POPUP_HEIGHT)
-        card.pack_start(self._build_avatar(), False, False, 14)
-        card.pack_start(self._build_copy(), True, True, 0)
-        card.pack_end(self._build_close_button(), False, False, 14)
-        return card
+        return self._build_video()
 
-    def _build_copy(self) -> Gtk.Widget:
-        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        copy.set_valign(Gtk.Align.CENTER)
-        copy.set_hexpand(True)
+    def _build_video(self) -> Gtk.Widget:
+        if AVATAR_VIDEO.exists():
+            try:
+                self.video = LoopingVideo(
+                    AVATAR_VIDEO,
+                    POPUP_WIDTH,
+                    POPUP_HEIGHT,
+                )
+                return self.video
+            except (FileNotFoundError, OSError):
+                self.video = None
 
-        title = Gtk.Label(label="Nixi listening")
-        title.get_style_context().add_class("nixi-title")
-        title.set_xalign(0)
-        copy.pack_start(title, False, False, 0)
-
-        body = Gtk.Label(label='Opened by the "Hey Nixi" voice trigger.')
-        body.get_style_context().add_class("nixi-body")
-        body.set_xalign(0)
-        body.set_line_wrap(True)
-        copy.pack_start(body, False, False, 0)
-
-        backend = "Wayland layer-shell" if self.runtime.use_layer_shell else "GTK fallback"
-        detail = Gtk.Label(label=backend)
-        detail.get_style_context().add_class("nixi-detail")
-        detail.set_xalign(0)
-        copy.pack_start(detail, False, False, 0)
-        return copy
-
-    def _build_close_button(self) -> Gtk.Widget:
-        button = Gtk.Button(label="×")
-        button.get_style_context().add_class("nixi-close")
-        button.set_size_request(36, 36)
-        button.set_valign(Gtk.Align.CENTER)
-        button.connect("clicked", lambda _button: self.close())
-        return button
-
-    def _build_avatar(self) -> Gtk.Widget:
         pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
             str(AVATAR_SVG),
-            AVATAR_SIZE,
-            AVATAR_SIZE,
-            True,
+            POPUP_WIDTH,
+            POPUP_HEIGHT,
+            False,
         )
-        avatar = Gtk.Image.new_from_pixbuf(pixbuf)
-        avatar.set_size_request(AVATAR_SIZE, AVATAR_SIZE)
-        avatar.get_style_context().add_class("nixi-avatar")
-        return avatar
+        fallback = Gtk.Image.new_from_pixbuf(pixbuf)
+        fallback.set_size_request(POPUP_WIDTH, POPUP_HEIGHT)
+        return fallback
 
     def _on_key_press(self, _window: Gtk.Window, event: Gdk.EventKey) -> bool:
         if event.keyval == Gdk.KEY_Escape:
@@ -160,25 +141,148 @@ class NixiPopup:
         self.window.move(x, y)
 
 
+class LoopingVideo(Gtk.DrawingArea):
+    """Render a silent, rounded, looping MP4 using FFmpeg."""
+
+    def __init__(self, path: Path, width: int, height: int) -> None:
+        super().__init__()
+        self.width = width
+        self.height = height
+        self.frame_bytes = width * height * 3
+        self.stopped = threading.Event()
+        self.frame_lock = threading.Lock()
+        self.latest_frame: bytes | None = None
+        self.update_pending = False
+        self.pixbuf: GdkPixbuf.Pixbuf | None = None
+        self.set_size_request(width, height)
+        self.connect("draw", self._on_draw)
+
+        command = [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-re",
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(path),
+            "-an",
+            "-vf",
+            (
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}"
+            ),
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "-",
+        ]
+        self.process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.thread = threading.Thread(
+            target=self._read_frames,
+            name="nixi-popup-video",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def stop(self) -> None:
+        if self.stopped.is_set():
+            return
+        self.stopped.set()
+        if self.process.poll() is None:
+            self.process.terminate()
+        self.thread.join(timeout=1)
+        if self.process.poll() is None:
+            self.process.kill()
+        with self.frame_lock:
+            self.latest_frame = None
+
+    def _read_frames(self) -> None:
+        assert self.process.stdout is not None
+        pending = bytearray()
+        while not self.stopped.is_set():
+            chunk = self.process.stdout.read(self.frame_bytes - len(pending))
+            if not chunk:
+                return
+            pending.extend(chunk)
+            if len(pending) != self.frame_bytes:
+                continue
+            frame = bytes(pending)
+            pending.clear()
+            with self.frame_lock:
+                self.latest_frame = frame
+                if self.update_pending:
+                    continue
+                self.update_pending = True
+            GLib.idle_add(self._display_latest_frame)
+
+    def _display_latest_frame(self) -> bool:
+        with self.frame_lock:
+            frame = self.latest_frame
+            self.latest_frame = None
+            self.update_pending = False
+        if self.stopped.is_set() or frame is None:
+            return GLib.SOURCE_REMOVE
+        pixels = GLib.Bytes.new(frame)
+        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
+            pixels,
+            GdkPixbuf.Colorspace.RGB,
+            False,
+            8,
+            self.width,
+            self.height,
+            self.width * 3,
+        )
+        self.pixbuf = pixbuf
+        self.queue_draw()
+        return GLib.SOURCE_REMOVE
+
+    def _on_draw(self, _widget: Gtk.Widget, context: object) -> bool:
+        if self.pixbuf is None:
+            return False
+
+        radius = min(POPUP_RADIUS, self.width / 2, self.height / 2)
+        self._rounded_rectangle(context, 0.5, 0.5, self.width - 1, self.height - 1, radius)
+        context.save()
+        context.clip()
+        Gdk.cairo_set_source_pixbuf(context, self.pixbuf, 0, 0)
+        context.paint()
+        context.restore()
+
+        self._rounded_rectangle(context, 0.5, 0.5, self.width - 1, self.height - 1, radius)
+        context.set_source_rgba(1, 1, 1, 0.22)
+        context.set_line_width(1)
+        context.stroke()
+        return False
+
+    @staticmethod
+    def _rounded_rectangle(
+        context: object,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        radius: float,
+    ) -> None:
+        context.new_sub_path()
+        context.arc(x + width - radius, y + radius, radius, -pi / 2, 0)
+        context.arc(x + width - radius, y + height - radius, radius, 0, pi / 2)
+        context.arc(x + radius, y + height - radius, radius, pi / 2, pi)
+        context.arc(x + radius, y + radius, radius, pi, 3 * pi / 2)
+        context.close_path()
+
+
 def load_css() -> None:
     css = b"""
     window { color: #f5f2eb; font: 11pt Sans; }
     #nixi-popup { background: transparent; }
-    .nixi-card {
-      background: rgba(30, 33, 42, 0.96);
-      border: 1px solid rgba(255, 255, 255, 0.16);
-      border-radius: 8px;
-      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
-    }
-    .nixi-avatar { border-radius: 8px; }
-    .nixi-title { color: #f5f2eb; font: 700 14pt Sans; }
-    .nixi-body { color: #b8b5ad; font: 11pt Sans; }
-    .nixi-detail { color: #65d6c8; font: 9pt Sans; }
-    .nixi-close {
-      background: #2a2d36;
-      color: #f5f2eb;
-      border-radius: 8px;
-    }
     """
     provider = Gtk.CssProvider()
     provider.load_from_data(css)
@@ -192,8 +296,16 @@ def load_css() -> None:
 def main() -> None:
     load_css()
     popup = NixiPopup()
+    signal.signal(
+        signal.SIGTERM,
+        lambda _signum, _frame: GLib.idle_add(popup.close),
+    )
     popup.open()
-    Gtk.main()
+    try:
+        Gtk.main()
+    finally:
+        if popup.video is not None:
+            popup.video.stop()
 
 
 if __name__ == "__main__":

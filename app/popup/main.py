@@ -13,6 +13,13 @@ from pathlib import Path
 
 import gi
 
+try:
+    gi.require_foreign("cairo")
+except ImportError as exc:
+    raise SystemExit(
+        "nixi-popup needs the system PyCairo bindings. "
+        "Install the distro package, for example: sudo pacman -S python-cairo"
+    ) from exc
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")

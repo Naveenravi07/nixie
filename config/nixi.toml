@@ -1,0 +1,42 @@
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[voice]
+wake_phrases = [
+  "hey nixi",
+  "hey nixie",
+  "hey nicki",
+  "hey nicky",
+  "hey nick see",
+  "hey next see",
+  "hey next thing",
+]
+model = "tiny.en"
+language = "en"
+sample_rate = 16000
+speech_threshold = 500
+silence_ms = 400
+speech_start_ms = 150
+min_speech_ms = 250
+max_utterance_seconds = 8
+command_timeout_seconds = 8
+calibration_ms = 1000
+adaptive_noise_ratio = 2.5
+# Set this to a PipeWire node id or name to override the default microphone.
+microphone_target = ""
+
+[actions.say_hello]
+description = "Test action that prints a hello response"
+command = "printf 'Hello from Nixi'"
+triggers = ["hello", "say hello"]
+
+[actions.take_screenshot]
+description = "Take a screenshot using your local screenshot command"
+command = "printf 'Configure config/nixi.toml with your screenshot script'"
+triggers = ["screenshot", "take screenshot"]
+
+[actions.set_wallpaper]
+description = "Set the wallpaper using your local wallpaper command"
+command = "printf 'Configure config/nixi.toml with your wallpaper script for %s' {path:q}"
+triggers = ["set wallpaper", "change wallpaper"]

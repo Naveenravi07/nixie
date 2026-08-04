@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Local HTTP server for Lexi messages and user-configured actions."""
+"""Local HTTP server for Nixi messages and user-configured actions."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import tempfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,7 +12,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from .actions import ActionRegistry
-from .config import LexiConfig, load_config
+from .config import NixiConfig, load_config
 
 
 class RequestError(ValueError):
@@ -23,12 +22,12 @@ class RequestError(ValueError):
         self.message = message
 
 
-class LexiRequestHandler(BaseHTTPRequestHandler):
-    server: "LexiHTTPServer"
+class NixiRequestHandler(BaseHTTPRequestHandler):
+    server: "NixiHTTPServer"
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._send_json({"ok": True, "service": "lexi-server"})
+            self._send_json({"ok": True, "service": "nixi-server"})
             return
 
         if self.path == "/actions":
@@ -40,10 +39,6 @@ class LexiRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path == "/message":
             self._handle_message()
-            return
-
-        if self.path == "/message/audio":
-            self._handle_audio()
             return
 
         if self.path.startswith("/actions/"):
@@ -121,30 +116,6 @@ class LexiRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def _handle_audio(self) -> None:
-        audio = self.rfile.read(self._content_length())
-        if not audio:
-            self._send_error(HTTPStatus.BAD_REQUEST, "Missing audio body")
-            return
-
-        suffix = self.headers.get("X-Lexi-Audio-Suffix", ".wav")
-        with tempfile.NamedTemporaryFile(
-            prefix="lexi-audio-",
-            suffix=suffix,
-            delete=False,
-        ) as audio_file:
-            audio_file.write(audio)
-            audio_path = Path(audio_file.name)
-
-        self._send_json(
-            {
-                "audio_path": str(audio_path),
-                "response": "Audio received. Transcription is not wired yet.",
-                "action": None,
-            },
-            status=HTTPStatus.ACCEPTED,
-        )
-
     def _read_json(self, required: bool = True) -> dict[str, Any]:
         length = self._content_length()
         if length == 0:
@@ -175,16 +146,16 @@ class LexiRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": message}, status=status)
 
 
-class LexiHTTPServer(ThreadingHTTPServer):
-    def __init__(self, config: LexiConfig) -> None:
-        super().__init__((config.server.host, config.server.port), LexiRequestHandler)
+class NixiHTTPServer(ThreadingHTTPServer):
+    def __init__(self, config: NixiConfig) -> None:
+        super().__init__((config.server.host, config.server.port), NixiRequestHandler)
         self.config = config
         self.actions = ActionRegistry(config.actions)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the local Lexi server.")
-    parser.add_argument("--config", type=Path, help="path to lexi.toml")
+    parser = argparse.ArgumentParser(description="Run the local Nixi server.")
+    parser.add_argument("--config", type=Path, help="path to nixi.toml")
     parser.add_argument("--host", help="override configured host")
     parser.add_argument("--port", type=int, help="override configured port")
     return parser.parse_args()
@@ -194,20 +165,21 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     if args.host is not None or args.port is not None:
-        config = LexiConfig(
+        config = NixiConfig(
             server=type(config.server)(
                 host=args.host or config.server.host,
                 port=args.port or config.server.port,
             ),
+            voice=config.voice,
             actions=config.actions,
         )
 
-    server = LexiHTTPServer(config)
-    print(f"Lexi server listening on http://{config.server.host}:{config.server.port}")
+    server = NixiHTTPServer(config)
+    print(f"Nixi server listening on http://{config.server.host}:{config.server.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nLexi server stopped.")
+        print("\nNixi server stopped.")
     finally:
         server.server_close()
 

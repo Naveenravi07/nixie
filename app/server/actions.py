@@ -1,4 +1,4 @@
-"""User-configured local actions for Lexi."""
+"""User-configured local actions for Nixi."""
 
 from __future__ import annotations
 

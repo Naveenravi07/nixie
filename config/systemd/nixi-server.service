@@ -1,0 +1,14 @@
+[Unit]
+Description=Nixi local action server
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Personal/nixie
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/uv run nixi-server
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

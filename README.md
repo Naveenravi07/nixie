@@ -1,98 +1,90 @@
-# Nixie / Lexi Popup Prototype
+# Nixi
 
-This repo currently contains a small GTK popup prototype for Lexi. On Wayland,
-it uses `gtk-layer-shell` to anchor the popup at the bottom of the screen. On
-other sessions, it falls back to a regular GTK utility popup.
+Nixi is a local voice-command assistant for Linux. It listens through
+PipeWire, transcribes speech with a local Whisper model, displays a small GTK
+popup, and dispatches matched commands to user-configured actions.
+
+## Components
+
+| Component | Command | Purpose |
+| --- | --- | --- |
+| Voice | `uv run nixi-voice` | Microphone, wake phrase, silence detection, transcription |
+| Server | `uv run nixi-server` | Message matching and configured action execution |
+| Popup | `uv run nixi-popup` | Bottom-center GTK layer-shell window |
+
+The voice process starts and closes the popup automatically. The popup can also
+be run directly for visual testing.
+
+## Setup
+
+Install [uv](https://docs.astral.sh/uv/) and synchronize the environment:
+
+```sh
+uv sync
+```
+
+uv selects Python 3.13 from `.python-version`, creates `.venv`, installs the
+declared dependencies, and writes `uv.lock`. The first voice launch downloads
+the configured Whisper model.
+
+The popup uses the distribution-provided GTK 3, PyGObject, librsvg, and
+gtk-layer-shell bindings. On Arch Linux these are provided by `python-gobject`,
+`gtk3`, `librsvg`, and `gtk-layer-shell`. The `nixi-popup` uv command launches
+that native GUI through the system Python interpreter.
 
 ## Run
 
-Open only the bottom popup:
+Start the server:
 
 ```sh
-python3 -m app.agent_window.main --open
+uv run nixi-server
 ```
 
-`--open` is the command to use from a window-manager keybind. Closing the popup
-also exits the process.
-
-The test controller is still available while prototyping:
+Start the voice daemon in another terminal and remain quiet during its one-second
+microphone calibration:
 
 ```sh
-python3 -m app.agent_window.main --controller
+uv run nixi-voice
 ```
 
-In controller mode, use any of these triggers:
+Say `Hey Nixi`, wait for the popup, and speak a command. A single utterance such
+as `Hey Nixi, take a screenshot` also works. Audio remains in memory and is not
+uploaded or saved.
 
-- Click `Open Lexi`
-- Press `Ctrl+Space`
-- Type `hey lexi` and press Enter
+## Configuration
 
-Run the local server:
-
-```sh
-python3 -m app.server.main
-```
-
-The server listens on `127.0.0.1:8765` by default and loads actions from
-`config/lexi.toml`.
-
-The old launchers still work:
-
-```sh
-python3 app/lexi_popup.py --controller
-python3 app/lexi_server.py
-```
-
-Useful test requests:
-
-```sh
-curl http://127.0.0.1:8765/health
-curl http://127.0.0.1:8765/actions
-curl -X POST http://127.0.0.1:8765/message \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"say hello"}'
-```
-
-## Action Config
-
-Actions are local command bindings. Lexi asks for an action by name; your config
-decides what command actually runs on this machine.
+Edit [config/nixi.toml](config/nixi.toml) to change wake-phrase variants, audio
+thresholds, model settings, and actions. For example:
 
 ```toml
 [actions.set_wallpaper]
-description = "Set wallpaper with my personal script"
-command = "/home/shastri/.local/bin/set-wallpaper {path:q}"
+description = "Set the wallpaper"
+command = "/home/me/.local/bin/set-wallpaper {path:q}"
 triggers = ["set wallpaper", "change wallpaper"]
 ```
 
-Use `{name}` for raw placeholder values and `{name:q}` for shell-quoted values.
-For custom scripts, prefer `{path:q}` or similar when paths can contain spaces.
+Use `{name}` for a raw action argument and `{name:q}` for a shell-quoted value.
+If room noise triggers recording, increase `speech_threshold`. If quiet speech
+is missed, decrease it. Set `microphone_target` to a node shown by
+`wpctl status` when the default input is wrong.
 
-## Keybind Examples
+The server exposes `GET /health`, `GET /actions`, `POST /message`, and
+`POST /actions/<name>` on `127.0.0.1:8765` by default.
 
-Hyprland:
+## Start at Login
+
+The included systemd user services assume this repository is located at
+`~/Personal/nixie`. Adjust their paths first if needed.
 
 ```sh
-bind = SUPER, L, exec, python3 -m app.agent_window.main --open
+mkdir -p ~/.config/systemd/user
+cp config/systemd/nixi-{server,voice}.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now nixi-voice.service
 ```
 
-BSPWM:
+View voice logs with:
 
 ```sh
-super + l
-    cd /home/shastri/Code/nixie && python3 -m app.agent_window.main --open
+journalctl --user -u nixi-voice.service -f
 ```
-
-## Wake Word Note
-
-Real voice activation needs a long-running background process. That process
-keeps the microphone open, detects a wake phrase like `hey lexi`, and then
-opens this popup.
-
-For the package, the clean shape is:
-
-- `lexi-popup`: draws the bottom popup
-- `lexi-daemon`: optional background service for wake word and global triggers
-- desktop/autostart or systemd user unit: starts `lexi-daemon` when the user opts in
-
-The current prototype does not constantly listen to audio yet.

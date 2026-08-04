@@ -1,1 +1,1 @@
-"""Lexi application packages."""
+"""Nixi application packages."""

@@ -1,1 +1,1 @@
-"""Local Lexi server package."""
+"""Local Nixi server package."""

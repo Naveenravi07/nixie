@@ -14,7 +14,8 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+gi.require_version("Rsvg", "2.0")
+from gi.repository import Gdk, Gtk, Rsvg  # noqa: E402
 
 try:
     try:
@@ -33,9 +34,9 @@ except (ImportError, ValueError):
 
 
 POPUP_WIDTH = 460
-POPUP_HEIGHT = 118
-POPUP_MARGIN_BOTTOM = 34
-AVATAR_SIZE = 78
+POPUP_HEIGHT = 96
+POPUP_MARGIN_BOTTOM = 24
+AVATAR_SIZE = 72
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AVATAR_SVG = REPO_ROOT / "assets" / "Q19WSHi0PH.svg"
 
@@ -70,7 +71,11 @@ class LexiPopup:
             self.window = self._build_window()
 
         self.window.show_all()
-        self.window.present()
+        # A layer-shell surface is not an XDG toplevel.  present() asks GDK to
+        # activate it as one, which can make the compositor disconnect us with
+        # a Wayland protocol error.  Mapping the window is sufficient here.
+        if not self.runtime.can_use_layer_shell:
+            self.window.present()
         self._position_fallback_window()
 
     def close(self) -> None:
@@ -154,14 +159,37 @@ class LexiPopup:
         return close
 
     def _build_avatar(self) -> Gtk.Widget:
-        webkit_avatar = self._build_webkit_avatar()
-        if webkit_avatar is not None:
-            return webkit_avatar
+        # WebKit creates additional native Wayland surfaces for its accelerated
+        # renderer.  Nesting those below a GTK3 layer-shell surface is unstable
+        # on several compositors and can terminate the entire client with
+        # GDK's "Error 71 (Protocol error)".  GdkPixbuf renders the same SVG
+        # safely (without animation) for the Wayland overlay.
+        if not self.runtime.can_use_layer_shell:
+            webkit_avatar = self._build_webkit_avatar()
+            if webkit_avatar is not None:
+                return webkit_avatar
 
-        avatar = Gtk.Image.new_from_file(str(AVATAR_SVG))
+        avatar = Gtk.DrawingArea()
         avatar.set_size_request(AVATAR_SIZE, AVATAR_SIZE)
         avatar.get_style_context().add_class("lexi-avatar")
+        svg = Rsvg.Handle.new_from_file(str(AVATAR_SVG))
+        avatar.connect("draw", self._draw_native_avatar, svg)
         return avatar
+
+    def _draw_native_avatar(
+        self,
+        widget: Gtk.DrawingArea,
+        context: object,
+        svg: Rsvg.Handle,
+    ) -> bool:
+        allocation = widget.get_allocation()
+        viewport = Rsvg.Rectangle()
+        viewport.x = 0
+        viewport.y = 0
+        viewport.width = allocation.width
+        viewport.height = allocation.height
+        svg.render_document(context, viewport)
+        return False
 
     def _build_webkit_avatar(self) -> Gtk.Widget | None:
         if WebKit2 is None or not AVATAR_SVG.exists():

@@ -10,9 +10,9 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "3.0")
-gi.require_version("Rsvg", "2.0")
-from gi.repository import Gdk, Gtk, Rsvg  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gtk  # noqa: E402
 
 try:
     gi.require_version("GtkLayerShell", "0.1")
@@ -130,23 +130,16 @@ class NixiPopup:
         return button
 
     def _build_avatar(self) -> Gtk.Widget:
-        avatar = Gtk.DrawingArea()
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            str(AVATAR_SVG),
+            AVATAR_SIZE,
+            AVATAR_SIZE,
+            True,
+        )
+        avatar = Gtk.Image.new_from_pixbuf(pixbuf)
         avatar.set_size_request(AVATAR_SIZE, AVATAR_SIZE)
         avatar.get_style_context().add_class("nixi-avatar")
-        svg = Rsvg.Handle.new_from_file(str(AVATAR_SVG))
-        avatar.connect("draw", self._draw_avatar, svg)
         return avatar
-
-    @staticmethod
-    def _draw_avatar(widget: Gtk.DrawingArea, context: object, svg: Rsvg.Handle) -> bool:
-        allocation = widget.get_allocation()
-        viewport = Rsvg.Rectangle()
-        viewport.x = 0
-        viewport.y = 0
-        viewport.width = allocation.width
-        viewport.height = allocation.height
-        svg.render_document(context, viewport)
-        return False
 
     def _on_key_press(self, _window: Gtk.Window, event: Gdk.EventKey) -> bool:
         if event.keyval == Gdk.KEY_Escape:
@@ -159,9 +152,9 @@ class NixiPopup:
         return True
 
     def _position_fallback_window(self) -> None:
-        screen = self.window.get_screen()
-        monitor = screen.get_primary_monitor()
-        geometry = screen.get_monitor_geometry(monitor)
+        display = self.window.get_display()
+        monitor = display.get_primary_monitor() or display.get_monitor(0)
+        geometry = monitor.get_geometry()
         x = geometry.x + max(0, (geometry.width - POPUP_WIDTH) // 2)
         y = geometry.y + max(0, geometry.height - POPUP_HEIGHT - POPUP_MARGIN_BOTTOM)
         self.window.move(x, y)

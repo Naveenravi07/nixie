@@ -12,15 +12,20 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import numpy as np
 
+from app.environment import load_environment
+from app.event_log import log_event
 from app.server.config import VoiceConfig, load_config
+from app.voice.stt import SarvamRealtimeTranscriber
+from app.voice.tts import SarvamSpeaker
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -124,6 +129,11 @@ class UtteranceSegmenter:
         self.speech_frames = 0
         self.silent_frames = 0
 
+    def reset(self) -> None:
+        """Forget buffered speech while preserving the calibrated noise floor."""
+        self._reset()
+        self.pre_roll.clear()
+
     def _update_noise_floor(self, rms: float) -> None:
         if self.noise_floor == 0:
             self.noise_floor = rms
@@ -184,6 +194,17 @@ class PipeWireRecorder:
                 self.process.wait()
         if self.thread is not None:
             self.thread.join(timeout=2)
+
+    def discard_pending(self) -> None:
+        """Discard audio captured while Nixi was thinking or speaking."""
+        while True:
+            try:
+                frame = self.frame_queue.get_nowait()
+            except queue.Empty:
+                return
+            if frame is None:
+                self.frame_queue.put_nowait(None)
+                return
 
     def _capture(self) -> None:
         assert self.process is not None and self.process.stdout is not None
@@ -273,6 +294,11 @@ class NixiVoiceDaemon:
         self.recorder = PipeWireRecorder(self.voice)
         self.popup = PopupController()
         self.transcriber = WhisperTranscriber(self.voice)
+        self.sarvam_transcriber = SarvamRealtimeTranscriber(
+            self.config.stt,
+            self.voice.sample_rate,
+        )
+        self.speaker = SarvamSpeaker(self.config.tts)
         self.awaiting_command = False
         self.command_deadline = 0.0
         self.running = True
@@ -325,6 +351,9 @@ class NixiVoiceDaemon:
             if not woke:
                 return
             self.popup.open()
+            if self.config.stt.enabled:
+                self._handle_sarvam_command(utterance, inline_command)
+                return
             if inline_command:
                 self._process_command(inline_command)
             else:
@@ -336,29 +365,218 @@ class NixiVoiceDaemon:
         if command:
             self._process_command(command)
 
-    def _process_command(self, command: str) -> None:
+    def _handle_sarvam_command(
+        self,
+        wake_utterance: np.ndarray,
+        whisper_inline_command: str,
+    ) -> None:
+        request_id = uuid.uuid4().hex[:12]
+        try:
+            if whisper_inline_command:
+                transcript = self.sarvam_transcriber.transcribe_pcm(
+                    wake_utterance,
+                    request_id,
+                )
+                woke, sarvam_command = extract_wake_command(
+                    transcript,
+                    self.voice.wake_phrases,
+                )
+                command = sarvam_command if woke and sarvam_command else whisper_inline_command
+            else:
+                print("Listening for command...", flush=True)
+                command_audio = self._capture_utterance(
+                    timeout_seconds=self.config.stt.timeout_seconds,
+                )
+                if command_audio is None:
+                    print("Listening timed out.", flush=True)
+                    self.popup.close()
+                    return
+                command = self.sarvam_transcriber.transcribe_pcm(
+                    command_audio,
+                    request_id,
+                )
+        except RuntimeError as error:
+            log_event("voice", "sarvam_stt.failed", request_id, error=str(error))
+            print("Sarvam STT failed; falling back to local Whisper.", file=sys.stderr)
+            self.awaiting_command = True
+            self.command_deadline = time.monotonic() + self.voice.command_timeout_seconds
+            return
+
+        if command.strip():
+            self._process_command(command.strip(), request_id=request_id)
+            return
+
+        print("Sarvam did not detect a command.", flush=True)
+        self.popup.close()
+
+    def _capture_utterance(
+        self,
+        *,
+        timeout_seconds: float,
+        stop_event: threading.Event | None = None,
+        on_speech_start: Callable[[], None] | None = None,
+    ) -> np.ndarray | None:
+        """Capture one locally segmented utterance from the live recorder."""
+        deadline = time.monotonic() + timeout_seconds
+        notified_start = False
+        for frame in self.recorder.frames():
+            if not self.running or (stop_event is not None and stop_event.is_set()):
+                return None
+            was_active = bool(self.segmenter.active_frames)
+            utterance = self.segmenter.push(frame)
+            if not notified_start and not was_active and self.segmenter.active_frames:
+                notified_start = True
+                if on_speech_start is not None:
+                    on_speech_start()
+            if utterance is not None:
+                return utterance
+            if time.monotonic() >= deadline:
+                self.segmenter.reset()
+                return None
+        return None
+
+    def _process_command(self, command: str, request_id: str | None = None) -> None:
         self.awaiting_command = False
-        print(f"Command: {command}", flush=True)
-        payload = json.dumps({"message": command}).encode("utf-8")
+        request_id = request_id or uuid.uuid4().hex[:12]
+        try:
+            while command and self.running:
+                response_text = self._request_response(command, request_id)
+                if response_text is None:
+                    return
+                command, request_id = self._speak_and_listen(response_text, request_id)
+                self.recorder.discard_pending()
+                self.segmenter.reset()
+        finally:
+            self.awaiting_command = False
+            self.recorder.discard_pending()
+            self.segmenter.reset()
+            self.popup.close()
+
+    def _request_response(self, command: str, request_id: str) -> str | None:
+        payload = json.dumps({"message": command, "request_id": request_id}).encode("utf-8")
         request = Request(
             f"http://{self.config.server.host}:{self.config.server.port}/message",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        server_started = time.perf_counter()
         try:
-            with urlopen(request, timeout=30) as response:
+            # Key failover can outlive one provider request timeout.
+            with urlopen(request, timeout=120) as response:
                 result = json.load(response)
-            print(f"Nixi: {result.get('response', 'Command processed.')}", flush=True)
+            return str(result.get("response", "Command processed.")).strip()
         except HTTPError as error:
-            print(f"Nixi server rejected the command: HTTP {error.code}", file=sys.stderr)
+            detail = ""
+            try:
+                error_payload = json.loads(error.read().decode("utf-8"))
+                detail = str(error_payload.get("error", "")).strip()
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                pass
+            suffix = f": {detail}" if detail else ""
+            print(
+                f"Nixi server rejected the command: HTTP {error.code}{suffix}",
+                file=sys.stderr,
+            )
+            log_event(
+                "voice",
+                "server_request.failed",
+                request_id,
+                duration_ms=round((time.perf_counter() - server_started) * 1000),
+                status=error.code,
+                error=detail,
+            )
+            return None
         except URLError as error:
             print(
                 f"Cannot reach the Nixi server at {request.full_url}: {error.reason}",
                 file=sys.stderr,
             )
+            log_event(
+                "voice",
+                "server_request.failed",
+                request_id,
+                duration_ms=round((time.perf_counter() - server_started) * 1000),
+                error=str(error.reason),
+            )
+            return None
+
+    def _speak_and_listen(
+        self,
+        response_text: str,
+        response_request_id: str,
+    ) -> tuple[str, str]:
+        """Speak a response while listening for barge-in or a follow-up turn."""
+        listen_request_id = uuid.uuid4().hex[:12]
+        stop_listening = threading.Event()
+        tts_ready = threading.Event()
+        tts_finished = threading.Event()
+        speech_started = threading.Event()
+
+        def finish_followup_window() -> None:
+            timer = threading.Timer(
+                self.voice.command_timeout_seconds,
+                stop_listening.set,
+            )
+            timer.daemon = True
+            timer.start()
+
+        def speak_response() -> None:
+            try:
+                self.speaker.speak(
+                    response_text,
+                    request_id=response_request_id,
+                    started_event=tts_ready,
+                )
+            except RuntimeError as error:
+                log_event("voice", "sarvam.failed", response_request_id, error=str(error))
+            finally:
+                tts_finished.set()
+                finish_followup_window()
+
+        def handle_speech_start() -> None:
+            if speech_started.is_set():
+                return
+            speech_started.set()
+            log_event(
+                "voice",
+                "followup.detected" if tts_finished.is_set() else "barge_in.detected",
+                listen_request_id,
+            )
+            self.speaker.stop()
+
+        speaker_thread = threading.Thread(
+            target=speak_response,
+            name="nixi-tts",
+            daemon=True,
+        )
+        speaker_thread.start()
+        tts_ready.wait(timeout=1)
+
+        try:
+            followup_audio = self._capture_utterance(
+                timeout_seconds=300,
+                stop_event=stop_listening,
+                on_speech_start=handle_speech_start,
+            )
+            next_command = (
+                self.sarvam_transcriber.transcribe_pcm(
+                    followup_audio,
+                    listen_request_id,
+                )
+                if followup_audio is not None
+                else ""
+            )
+        except RuntimeError as error:
+            log_event("voice", "sarvam_stt.failed", listen_request_id, error=str(error))
+            next_command = ""
         finally:
-            self.popup.close()
+            stop_listening.set()
+            if speech_started.is_set():
+                self.speaker.stop()
+            speaker_thread.join(timeout=5)
+
+        return next_command.strip(), listen_request_id
 
     def _expire_command_window(self) -> None:
         if self.awaiting_command and time.monotonic() >= self.command_deadline:
@@ -374,6 +592,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    load_environment()
     args = parse_args()
     try:
         daemon = NixiVoiceDaemon(args.config)

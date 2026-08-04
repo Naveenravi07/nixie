@@ -8,7 +8,7 @@ popup, and dispatches matched commands to user-configured actions.
 
 | Component | Command | Purpose |
 | --- | --- | --- |
-| Voice | `uv run nixi-voice` | Microphone, wake phrase, silence detection, transcription |
+| Voice | `uv run nixi-voice` | Local wake phrase, Sarvam command STT, and Sarvam TTS |
 | Server | `uv run nixi-server` | Message matching and configured action execution |
 | Popup | `uv run nixi-popup` | Bottom-center GTK layer-shell window |
 
@@ -32,6 +32,24 @@ gtk-layer-shell bindings. On Arch Linux these are provided by `python-gobject`,
 `gtk3`, `librsvg`, and `gtk-layer-shell`. The `nixi-popup` uv command launches
 that native GUI through the system Python interpreter.
 
+Copy the environment template and add your API keys:
+
+```sh
+cp .env.example .env
+```
+
+```dotenv
+GOOGLE_API_KEY1=your-first-google-key
+GOOGLE_API_KEY2=your-second-google-key
+# Continue through GOOGLE_API_KEY10 when needed.
+SARVAM_API_KEY=your-sarvam-key
+```
+
+`.env` is ignored by Git. Gemini 3.5 Flash requests run through LiteLLM and
+rotate across all configured Google keys. Any failed key is skipped for the
+configured cooldown, including rate-limit, authentication, and model-access
+errors. Sarvam uses only `SARVAM_API_KEY`.
+
 ## Run
 
 Start the server:
@@ -48,13 +66,14 @@ uv run nixi-voice
 ```
 
 Say `Hey Nixi`, wait for the popup, and speak a command. A single utterance such
-as `Hey Nixi, take a screenshot` also works. Audio remains in memory and is not
-uploaded or saved.
+as `Hey Nixi, take a screenshot` also works. Idle microphone and wake-word audio
+stay local. After Nixi wakes, command audio is streamed to Sarvam for
+transcription; it remains in memory and is not saved by Nixi.
 
 ## Configuration
 
 Edit [config/nixi.toml](config/nixi.toml) to change wake-phrase variants, audio
-thresholds, model settings, and actions. For example:
+thresholds, Saaras realtime STT settings, model settings, and actions. For example:
 
 ```toml
 [actions.set_wallpaper]

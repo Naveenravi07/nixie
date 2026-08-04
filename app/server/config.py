@@ -45,6 +45,45 @@ class VoiceConfig:
 
 
 @dataclass(frozen=True)
+class LLMConfig:
+    model: str = "gemini-3.5-flash"
+    system_prompt: str = (
+        "You are Nixi, a concise and friendly desktop voice assistant. "
+        "Answer naturally for speech and avoid Markdown unless asked."
+    )
+    max_tokens: int = 1024
+    thinking_level: str = "minimal"
+    timeout_seconds: float = 30.0
+    history_turns: int = 8
+    cooldown_seconds: int = 60
+
+
+@dataclass(frozen=True)
+class STTConfig:
+    enabled: bool = True
+    model: str = "saaras:v3-realtime"
+    language: str = "auto"
+    mode: str = "transcribe"
+    stream_type: str = "fast"
+    threshold: float = 0.3
+    silence_ms: int = 500
+    min_speech_ms: int = 250
+    timeout_seconds: float = 15.0
+
+
+@dataclass(frozen=True)
+class TTSConfig:
+    enabled: bool = True
+    model: str = "bulbul:v3"
+    language: str = "en-IN"
+    speaker: str = "shubh"
+    pace: float = 1.05
+    sample_rate: int = 24_000
+    temperature: float = 0.6
+    timeout_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
 class ActionConfig:
     name: str
     command: str
@@ -56,6 +95,9 @@ class ActionConfig:
 class NixiConfig:
     server: ServerConfig
     voice: VoiceConfig
+    llm: LLMConfig
+    stt: STTConfig
+    tts: TTSConfig
     actions: dict[str, ActionConfig]
 
 
@@ -98,12 +140,55 @@ def load_config(path: Path | None = None) -> NixiConfig:
         ),
     )
 
+    llm_data = data.get("llm", {})
+    llm = LLMConfig(
+        model=str(llm_data.get("model", LLMConfig.model)),
+        system_prompt=str(llm_data.get("system_prompt", LLMConfig.system_prompt)),
+        max_tokens=int(llm_data.get("max_tokens", LLMConfig.max_tokens)),
+        thinking_level=str(llm_data.get("thinking_level", LLMConfig.thinking_level)),
+        timeout_seconds=float(llm_data.get("timeout_seconds", LLMConfig.timeout_seconds)),
+        history_turns=int(llm_data.get("history_turns", LLMConfig.history_turns)),
+        cooldown_seconds=int(llm_data.get("cooldown_seconds", LLMConfig.cooldown_seconds)),
+    )
+
+    stt_data = data.get("stt", {})
+    stt = STTConfig(
+        enabled=bool(stt_data.get("enabled", STTConfig.enabled)),
+        model=str(stt_data.get("model", STTConfig.model)),
+        language=str(stt_data.get("language", STTConfig.language)),
+        mode=str(stt_data.get("mode", STTConfig.mode)),
+        stream_type=str(stt_data.get("stream_type", STTConfig.stream_type)),
+        threshold=float(stt_data.get("threshold", STTConfig.threshold)),
+        silence_ms=int(stt_data.get("silence_ms", STTConfig.silence_ms)),
+        min_speech_ms=int(stt_data.get("min_speech_ms", STTConfig.min_speech_ms)),
+        timeout_seconds=float(stt_data.get("timeout_seconds", STTConfig.timeout_seconds)),
+    )
+
+    tts_data = data.get("tts", {})
+    tts = TTSConfig(
+        enabled=bool(tts_data.get("enabled", TTSConfig.enabled)),
+        model=str(tts_data.get("model", TTSConfig.model)),
+        language=str(tts_data.get("language", TTSConfig.language)),
+        speaker=str(tts_data.get("speaker", TTSConfig.speaker)),
+        pace=float(tts_data.get("pace", TTSConfig.pace)),
+        sample_rate=int(tts_data.get("sample_rate", TTSConfig.sample_rate)),
+        temperature=float(tts_data.get("temperature", TTSConfig.temperature)),
+        timeout_seconds=float(tts_data.get("timeout_seconds", TTSConfig.timeout_seconds)),
+    )
+
     actions = {
         name: _parse_action(name, action_data)
         for name, action_data in data.get("actions", {}).items()
     }
 
-    return NixiConfig(server=server, voice=voice, actions=actions)
+    return NixiConfig(
+        server=server,
+        voice=voice,
+        llm=llm,
+        stt=stt,
+        tts=tts,
+        actions=actions,
+    )
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

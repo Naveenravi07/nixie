@@ -5,14 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+from app.environment import load_environment
+from app.event_log import log_event
+
 from .actions import ActionRegistry
 from .config import NixiConfig, load_config
+from .llm import GeminiChat
 
 
 class RequestError(ValueError):
@@ -49,7 +55,8 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
         self._send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
 
     def log_message(self, fmt: str, *args: object) -> None:
-        print(f"{self.address_string()} - {fmt % args}")
+        # Successful requests already have concise start/end event logs.
+        return
 
     def _handle_message(self) -> None:
         try:
@@ -63,26 +70,65 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.BAD_REQUEST, "Missing message")
             return
 
+        request_id = str(payload.get("request_id", "")).strip() or uuid.uuid4().hex[:12]
         action = self.server.actions.find_for_message(message)
         if action is None:
+            started = time.perf_counter()
+            log_event(
+                "server",
+                "gemini.started",
+                request_id,
+                model=self.server.config.llm.model,
+                message=message,
+            )
+            try:
+                response = self.server.chat.reply(message, request_id=request_id)
+            except RuntimeError as error:
+                log_event(
+                    "server",
+                    "gemini.failed",
+                    request_id,
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    error=str(error),
+                )
+                self._send_error(HTTPStatus.BAD_GATEWAY, str(error))
+                return
+            log_event(
+                "server",
+                "gemini.completed",
+                request_id,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                response=response,
+            )
             self._send_json(
                 {
+                    "request_id": request_id,
                     "transcript": message,
-                    "response": "I heard you, but I do not have a matching action yet.",
+                    "response": response,
                     "action": None,
                 }
             )
             return
 
         try:
+            log_event("server", "action.started", request_id, action=action.name)
             result = self.server.actions.run(action.name, payload.get("args", {}))
         except ValueError as error:
             self._send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
 
         response = f"Ran {action.name}." if result.ok else f"{action.name} failed."
+        log_event(
+            "server",
+            "action.completed",
+            request_id,
+            action=action.name,
+            success=result.ok,
+            response=response,
+        )
         self._send_json(
             {
+                "request_id": request_id,
                 "transcript": message,
                 "response": response,
                 "action": result.to_dict(),
@@ -136,11 +182,14 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            print("Client disconnected before the response was delivered.", flush=True)
 
     def _send_error(self, status: HTTPStatus, message: str) -> None:
         self._send_json({"ok": False, "error": message}, status=status)
@@ -151,6 +200,7 @@ class NixiHTTPServer(ThreadingHTTPServer):
         super().__init__((config.server.host, config.server.port), NixiRequestHandler)
         self.config = config
         self.actions = ActionRegistry(config.actions)
+        self.chat = GeminiChat(config.llm)
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,6 +212,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    load_environment()
     args = parse_args()
     config = load_config(args.config)
     if args.host is not None or args.port is not None:
@@ -171,10 +222,16 @@ def main() -> None:
                 port=args.port or config.server.port,
             ),
             voice=config.voice,
+            llm=config.llm,
+            stt=config.stt,
+            tts=config.tts,
             actions=config.actions,
         )
 
-    server = NixiHTTPServer(config)
+    try:
+        server = NixiHTTPServer(config)
+    except RuntimeError as error:
+        raise SystemExit(f"nixi-server: {error}") from None
     print(f"Nixi server listening on http://{config.server.host}:{config.server.port}")
     try:
         server.serve_forever()

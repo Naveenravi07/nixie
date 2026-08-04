@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import threading
+from types import SimpleNamespace
 
 import numpy as np
 
 from app.server.config import VoiceConfig
 from app.voice.main import (
+    NixiVoiceDaemon,
     UtteranceSegmenter,
     extract_wake_command,
     normalize_transcript,
@@ -73,6 +76,43 @@ class SegmenterTests(unittest.TestCase):
         self.assertIsNone(segmenter.push(speech))
         self.assertIsNone(segmenter.push(silence))
         self.assertIsNone(segmenter.push(silence))
+
+
+class ConversationTests(unittest.TestCase):
+    def test_barge_in_stops_speaker_and_returns_followup(self) -> None:
+        class FakeSpeaker:
+            def __init__(self) -> None:
+                self.stopped = False
+                self.released = threading.Event()
+
+            def speak(self, _text: str, request_id: str, started_event: object) -> bool:
+                started_event.set()
+                self.released.wait(timeout=1)
+                return False
+
+            def stop(self) -> None:
+                self.stopped = True
+                self.released.set()
+
+        class FakeTranscriber:
+            def transcribe_pcm(self, _audio: object, _request_id: str) -> str:
+                return "Here is my follow-up"
+
+        daemon = object.__new__(NixiVoiceDaemon)
+        daemon.voice = SimpleNamespace(command_timeout_seconds=0.01)
+        daemon.speaker = FakeSpeaker()
+        daemon.sarvam_transcriber = FakeTranscriber()
+        daemon.recorder = SimpleNamespace(frames=lambda: iter(()))
+        daemon._capture_utterance = lambda **options: (
+            options["on_speech_start"](),
+            np.ones(1600, dtype=np.int16),
+        )[1]
+
+        command, request_id = daemon._speak_and_listen("A long answer", "response-id")
+
+        self.assertEqual(command, "Here is my follow-up")
+        self.assertTrue(request_id)
+        self.assertTrue(daemon.speaker.stopped)
 
 
 if __name__ == "__main__":

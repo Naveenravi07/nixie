@@ -26,6 +26,37 @@ adaptive_noise_ratio = 2.5
 # Set this to a PipeWire node id or name to override the default microphone.
 microphone_target = ""
 
+[llm]
+model = "gemini-3.5-flash"
+system_prompt = """You are Nixi, a concise and friendly desktop voice assistant.
+Answer naturally for speech and avoid Markdown unless asked."""
+max_tokens = 1024
+thinking_level = "minimal"
+timeout_seconds = 30
+history_turns = 8
+cooldown_seconds = 60
+
+[stt]
+enabled = true
+model = "saaras:v3-realtime"
+language = "auto"
+mode = "transcribe"
+stream_type = "fast"
+threshold = 0.3
+silence_ms = 500
+min_speech_ms = 250
+timeout_seconds = 15
+
+[tts]
+enabled = true
+model = "bulbul:v3"
+language = "en-IN"
+speaker = "shubh"
+pace = 1.05
+sample_rate = 24000
+temperature = 0.6
+timeout_seconds = 30
+
 [actions.say_hello]
 description = "Test action that prints a hello response"
 command = "printf 'Hello from Nixi'"

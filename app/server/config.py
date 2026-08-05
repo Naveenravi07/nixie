@@ -41,12 +41,14 @@ class VoiceConfig:
     command_timeout_seconds: float = 8.0
     calibration_ms: int = 1_000
     adaptive_noise_ratio: float = 2.5
+    barge_in_threshold_multiplier: float = 1.8
+    barge_in_speech_start_ms: int = 300
     microphone_target: str = ""
 
 
 @dataclass(frozen=True)
 class LLMConfig:
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.5-flash-lite"
     system_prompt: str = (
         "You are Nixi, a concise and friendly desktop voice assistant. "
         "Answer naturally for speech and avoid Markdown unless asked."
@@ -54,15 +56,15 @@ class LLMConfig:
     max_tokens: int = 1024
     thinking_level: str = "minimal"
     timeout_seconds: float = 30.0
-    history_turns: int = 8
-    cooldown_seconds: int = 60
+    history_turns: int = 3
+    google_search_enabled: bool = True
 
 
 @dataclass(frozen=True)
 class STTConfig:
     enabled: bool = True
     model: str = "saaras:v3-realtime"
-    language: str = "auto"
+    language: str = "en-IN"
     mode: str = "transcribe"
     stream_type: str = "fast"
     threshold: float = 0.3
@@ -135,6 +137,15 @@ def load_config(path: Path | None = None) -> NixiConfig:
         adaptive_noise_ratio=float(
             voice_data.get("adaptive_noise_ratio", VoiceConfig.adaptive_noise_ratio)
         ),
+        barge_in_threshold_multiplier=float(
+            voice_data.get(
+                "barge_in_threshold_multiplier",
+                VoiceConfig.barge_in_threshold_multiplier,
+            )
+        ),
+        barge_in_speech_start_ms=int(
+            voice_data.get("barge_in_speech_start_ms", VoiceConfig.barge_in_speech_start_ms)
+        ),
         microphone_target=str(
             voice_data.get("microphone_target", VoiceConfig.microphone_target)
         ),
@@ -148,7 +159,9 @@ def load_config(path: Path | None = None) -> NixiConfig:
         thinking_level=str(llm_data.get("thinking_level", LLMConfig.thinking_level)),
         timeout_seconds=float(llm_data.get("timeout_seconds", LLMConfig.timeout_seconds)),
         history_turns=int(llm_data.get("history_turns", LLMConfig.history_turns)),
-        cooldown_seconds=int(llm_data.get("cooldown_seconds", LLMConfig.cooldown_seconds)),
+        google_search_enabled=bool(
+            llm_data.get("google_search_enabled", LLMConfig.google_search_enabled)
+        ),
     )
 
     stt_data = data.get("stt", {})

@@ -1,65 +1,89 @@
-"""Gemini conversation through a rotating LiteLLM credential pool."""
+"""Gemini conversation through Vertex AI Express Mode with 429 Retry & Search Fallback."""
 
 from __future__ import annotations
 
 import os
 import re
 import threading
-import time
 from typing import Any
 
-from app.event_log import log_event
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
 from .config import LLMConfig
 
 
-MAX_GOOGLE_KEYS = 10
+_CURRENT_INFORMATION_PATTERN = re.compile(
+    r"\b(?:"
+    r"weather|forecast|temperature|rain|storm|cyclone|humidity|air quality|"
+    r"news|headlines?|latest|recent|currently|right now|today|tomorrow|yesterday|"
+    r"live|score|match result|standings|schedule|traffic|road closure|"
+    r"holiday|school closure|college closure|district collector|alert|warning|"
+    r"price|stock|share price|market|crypto|bitcoin|exchange rate|"
+    r"election|poll results?|current president|current prime minister|current ceo|"
+    r"who is|what is the status|when is|where is"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
-def discover_google_api_keys() -> list[str]:
-    """Read unique numbered Gemini API keys without exposing their values."""
-    keys: list[str] = []
-    for index in range(1, MAX_GOOGLE_KEYS + 1):
-        key = os.environ.get(f"GOOGLE_API_KEY{index}", "").strip()
-        if key and key not in keys:
-            keys.append(key)
-    fallback = os.environ.get("GOOGLE_API_KEY", "").strip()
-    if fallback and fallback not in keys:
-        keys.append(fallback)
-    return keys
+def _is_rate_limit_error(exception: BaseException) -> bool:
+    """Check if the error is a 429 / RESOURCE_EXHAUSTED error."""
+    error_str = str(exception)
+    return "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
 
 
-class GeminiChat:
+class VertexChat:
     def __init__(self, config: LLMConfig) -> None:
-        keys = discover_google_api_keys()
-        if not keys:
+        api_key = os.environ.get("GOOGLE_CLOUD_API_KEY", "").strip()
+        if not api_key:
             raise RuntimeError(
-                "No Gemini key found. Set GOOGLE_API_KEY1 (and optionally GOOGLE_API_KEY2…10)."
+                "No Vertex AI Express Mode key configured. "
+                "Set GOOGLE_CLOUD_API_KEY in .env."
             )
 
         try:
-            from litellm import completion
+            from google import genai
+            from google.genai import types
         except ImportError as error:
-            raise RuntimeError("LiteLLM is missing; run `uv sync`.") from error
+            raise RuntimeError("Google Gen AI SDK is missing; run `uv sync`.") from error
 
-        self._completion = completion
-        self._api_keys = tuple(keys)
-        self._next_key_index = 0
-        self._cooldown_until: dict[int, float] = {}
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global").strip() or "global"
+
+        self._api_key = api_key
+        self._types = types
+        client_options: dict[str, Any] = {
+            "vertexai": True,
+            "api_key": api_key,
+            "http_options": types.HttpOptions(
+                timeout=round(config.timeout_seconds * 1_000),
+            ),
+        }
+        # An API key by itself selects Vertex Express Mode. Supplying a location
+        # without a project instead builds requests for `projects/None`.
+        if project:
+            client_options.update(project=project, location=location)
+        self._client = genai.Client(**client_options)
         self.config = config
-        self.messages: list[dict[str, str]] = [
-            {"role": "system", "content": config.system_prompt}
-        ]
+        self.messages: list[dict[str, str]] = []
         self.lock = threading.Lock()
         print(
-            f"Gemini ready: {config.model} with {len(keys)} rotating API key(s).",
+            f"Vertex AI Express ready: {config.model}.",
             flush=True,
         )
 
     def reply(self, user_message: str, request_id: str = "standalone") -> str:
         with self.lock:
             request_messages = [*self.messages, {"role": "user", "content": user_message}]
-            response = self._complete_with_rotation(request_messages, request_id)
+            response = self._complete(
+                request_messages,
+                use_google_search=self.should_use_google_search(user_message),
+            )
 
             content = self._response_text(response)
             if not content:
@@ -68,82 +92,88 @@ class GeminiChat:
             self.messages.extend(
                 [
                     {"role": "user", "content": user_message},
-                    {"role": "assistant", "content": content},
+                    {"role": "model", "content": content},
                 ]
             )
             self._trim_history()
             return content
 
-    def _complete_with_rotation(
-        self, messages: list[dict[str, str]], request_id: str
+    def should_use_google_search(self, user_message: str) -> bool:
+        """Use paid grounding only for prompts that need fresh world information."""
+        if not self.config.google_search_enabled or not user_message:
+            return False
+        return bool(_CURRENT_INFORMATION_PATTERN.search(user_message))
+
+    @retry(
+        retry=retry_if_exception(_is_rate_limit_error),
+        wait=wait_random_exponential(min=1, max=16),
+        stop=stop_after_attempt(5),
+        reraise=True,
+    )
+    def _complete_with_retry(
+        self,
+        messages: list[dict[str, str]],
+        config_options: dict[str, Any],
     ) -> Any:
-        last_error: Exception | None = None
-        now = time.monotonic()
-        indexes = [
-            (self._next_key_index + offset) % len(self._api_keys)
-            for offset in range(len(self._api_keys))
-        ]
-        available = [
-            index for index in indexes if self._cooldown_until.get(index, 0) <= now
-        ]
-        # If every key is cooling down, retry the pool instead of requiring a
-        # restart; a transient provider failure may already have cleared.
-        candidates = available or indexes
-
-        for index in candidates:
-            try:
-                response = self._completion(
-                    model=f"gemini/{self.config.model}",
-                    api_key=self._api_keys[index],
-                    messages=messages,
-                    max_tokens=self.config.max_tokens,
-                    timeout=self.config.timeout_seconds,
-                    reasoning_effort=self.config.thinking_level,
+        return self._client.models.generate_content(
+            model=self.config.model,
+            contents=[
+                self._types.Content(
+                    role=message["role"],
+                    parts=[self._types.Part.from_text(text=message["content"])],
                 )
-            except Exception as error:
-                last_error = error
-                self._cooldown_until[index] = now + self.config.cooldown_seconds
-                detail = self._safe_error_message(error)
-                log_event(
-                    "server",
-                    "gemini.key_failed",
-                    request_id,
-                    key_number=index + 1,
-                    cooldown_seconds=self.config.cooldown_seconds,
-                    error=detail,
-                )
-                continue
+                for message in messages
+            ],
+            config=self._types.GenerateContentConfig(**config_options),
+        )
 
-            self._cooldown_until.pop(index, None)
-            self._next_key_index = (index + 1) % len(self._api_keys)
-            return response
+    def _complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        use_google_search: bool = False,
+    ) -> Any:
+        config_options: dict[str, Any] = {
+            "system_instruction": self.config.system_prompt,
+            "max_output_tokens": self.config.max_tokens,
+        }
 
-        assert last_error is not None
-        detail = self._safe_error_message(last_error)
-        raise RuntimeError(
-            f"Gemini failed after trying every available API key: {detail}"
-        ) from last_error
+        # Safely parse thinking_level
+        thinking = (self.config.thinking_level or "").strip().lower()
+        if thinking and thinking != "off":
+            config_options["thinking_config"] = self._types.ThinkingConfig(
+                thinking_level=thinking.upper(),
+            )
+
+        if use_google_search:
+            config_options["tools"] = [
+                self._types.Tool(google_search=self._types.GoogleSearch())
+            ]
+
+        try:
+            return self._complete_with_retry(messages, config_options)
+        except Exception as error:
+            # Fallback: If 429 rate limit is triggered by search grounding, strip tools & retry plain completion
+            if use_google_search and _is_rate_limit_error(error):
+                config_options.pop("tools", None)
+                try:
+                    return self._complete_with_retry(messages, config_options)
+                except Exception as fallback_error:
+                    error = fallback_error
+
+            detail = self._safe_error_message(error)
+            raise RuntimeError(f"Vertex AI request failed: {detail}") from error
 
     def _trim_history(self) -> None:
         message_limit = self.config.history_turns * 2
-        self.messages = [self.messages[0], *self.messages[1:][-message_limit:]]
+        self.messages = self.messages[-message_limit:]
 
     def _safe_error_message(self, error: Exception) -> str:
-        message = str(error)
-        for api_key in self._api_keys:
-            message = message.replace(api_key, "[REDACTED]")
+        message = str(error).replace(self._api_key, "[REDACTED]")
         message = re.sub(r"\s+", " ", message).strip()
         return f"{type(error).__name__}: {message or 'no provider details'}"[:600]
 
     @staticmethod
     def _response_text(response: Any) -> str:
-        content = response.choices[0].message.content
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            return " ".join(
-                str(part.get("text", "")).strip()
-                for part in content
-                if isinstance(part, dict) and part.get("text")
-            ).strip()
-        return ""
+        content = getattr(response, "text", None)
+        return content.strip() if isinstance(content, str) else ""

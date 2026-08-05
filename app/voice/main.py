@@ -72,7 +72,14 @@ class UtteranceSegmenter:
         adaptive = self.noise_floor * self.config.adaptive_noise_ratio
         return max(float(self.config.speech_threshold), adaptive)
 
-    def push(self, frame: np.ndarray) -> np.ndarray | None:
+    def push(
+        self,
+        frame: np.ndarray,
+        *,
+        threshold: float | None = None,
+        speech_start_ms: int | None = None,
+        update_noise_floor: bool = True,
+    ) -> np.ndarray | None:
         rms = self._rms(frame)
         if self.calibration_frames:
             self.calibration_samples.append(rms)
@@ -82,16 +89,20 @@ class UtteranceSegmenter:
                 self.pre_roll.clear()
             return None
 
-        is_speech = rms >= self.effective_threshold
+        is_speech = rms >= (threshold if threshold is not None else self.effective_threshold)
+        required_start_ms = (
+            speech_start_ms if speech_start_ms is not None else self.config.speech_start_ms
+        )
 
         if not self.active_frames:
             self.pre_roll.append(frame)
             if not is_speech:
                 self.start_frames = 0
-                self._update_noise_floor(rms)
+                if update_noise_floor:
+                    self._update_noise_floor(rms)
                 return None
             self.start_frames += 1
-            if self.start_frames * self.frame_ms < self.config.speech_start_ms:
+            if self.start_frames * self.frame_ms < required_start_ms:
                 return None
             self.active_frames = list(self.pre_roll)
             self.pre_roll.clear()
@@ -415,15 +426,38 @@ class NixiVoiceDaemon:
         timeout_seconds: float,
         stop_event: threading.Event | None = None,
         on_speech_start: Callable[[], None] | None = None,
+        barge_in_until: threading.Event | None = None,
     ) -> np.ndarray | None:
         """Capture one locally segmented utterance from the live recorder."""
         deadline = time.monotonic() + timeout_seconds
         notified_start = False
+        was_barge_in_mode = barge_in_until is not None and not barge_in_until.is_set()
         for frame in self.recorder.frames():
             if not self.running or (stop_event is not None and stop_event.is_set()):
                 return None
+            barge_in_mode = (
+                barge_in_until is not None
+                and (not barge_in_until.is_set() or notified_start)
+            )
+            if was_barge_in_mode and not barge_in_mode:
+                # Drop audio buffered from Nixi's own voice before opening the
+                # normal-sensitivity follow-up window.
+                self.segmenter.reset()
+            was_barge_in_mode = barge_in_mode
             was_active = bool(self.segmenter.active_frames)
-            utterance = self.segmenter.push(frame)
+            utterance = self.segmenter.push(
+                frame,
+                threshold=(
+                    self.segmenter.effective_threshold
+                    * self.voice.barge_in_threshold_multiplier
+                    if barge_in_mode
+                    else None
+                ),
+                speech_start_ms=(
+                    self.voice.barge_in_speech_start_ms if barge_in_mode else None
+                ),
+                update_noise_floor=not barge_in_mode,
+            )
             if not notified_start and not was_active and self.segmenter.active_frames:
                 notified_start = True
                 if on_speech_start is not None:
@@ -558,6 +592,7 @@ class NixiVoiceDaemon:
                 timeout_seconds=300,
                 stop_event=stop_listening,
                 on_speech_start=handle_speech_start,
+                barge_in_until=tts_finished,
             )
             next_command = (
                 self.sarvam_transcriber.transcribe_pcm(

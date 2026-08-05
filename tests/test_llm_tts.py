@@ -2,62 +2,102 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.server.config import LLMConfig, TTSConfig
-from app.server.llm import GeminiChat, discover_google_api_keys
+from app.server.llm import VertexChat
 from app.voice.tts import SarvamSpeaker
 
 
-class GoogleKeyTests(unittest.TestCase):
-    def test_discovers_numbered_keys_in_order_and_removes_duplicates(self) -> None:
-        environment = {
-            "GOOGLE_API_KEY1": "first",
-            "GOOGLE_API_KEY3": "third",
-            "GOOGLE_API_KEY5": "first",
-            "GOOGLE_API_KEY": "fallback",
-        }
-        with patch.dict(os.environ, environment, clear=True):
-            self.assertEqual(discover_google_api_keys(), ["first", "third", "fallback"])
+class VertexChatTests(unittest.TestCase):
+    def test_calls_vertex_express_with_configured_api_key(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="Hello there.")
 
-    def test_rotates_to_next_key_after_any_error(self) -> None:
-        completion = MagicMock(
-            side_effect=[
-                RuntimeError("first key failed"),
-                SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content="Hello there."))]
-                ),
-            ]
-        )
-        fake_litellm = SimpleNamespace(completion=completion)
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client) as client_class,
+        ):
+            chat = VertexChat(LLMConfig())
+            self.assertEqual(chat.reply("Hello"), "Hello there.")
+
+        self.assertEqual(client_class.call_args.kwargs["vertexai"], True)
+        self.assertEqual(client_class.call_args.kwargs["api_key"], "vertex-key")
+        self.assertNotIn("location", client_class.call_args.kwargs)
+        request = client.models.generate_content.call_args.kwargs
+        self.assertEqual(request["model"], "gemini-3.5-flash-lite")
+        self.assertEqual(request["contents"][0].role, "user")
+        self.assertEqual(request["contents"][0].parts[0].text, "Hello")
+        self.assertIsNone(request["config"].tools)
+
+    def test_enables_google_search_only_for_current_information(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="It may rain.")
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig())
+            chat.reply("Will it rain in Ernakulam tomorrow?")
+
+        request_config = client.models.generate_content.call_args.kwargs["config"]
+        self.assertEqual(len(request_config.tools), 1)
+        self.assertIsNotNone(request_config.tools[0].google_search)
+
+    def test_uses_project_and_location_together_when_configured(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="Hello.")
 
         with (
             patch.dict(
                 os.environ,
-                {"GOOGLE_API_KEY1": "one", "GOOGLE_API_KEY2": "two"},
+                {
+                    "GOOGLE_CLOUD_API_KEY": "vertex-key",
+                    "GOOGLE_CLOUD_PROJECT": "nixi-project",
+                    "GOOGLE_CLOUD_LOCATION": "global",
+                },
                 clear=True,
             ),
-            patch.dict(sys.modules, {"litellm": fake_litellm}),
+            patch("google.genai.Client", return_value=client) as client_class,
         ):
-            chat = GeminiChat(LLMConfig())
-            self.assertEqual(chat.reply("Hello"), "Hello there.")
+            VertexChat(LLMConfig()).reply("Hello")
 
-        self.assertEqual(completion.call_count, 2)
-        self.assertEqual(completion.call_args_list[0].kwargs["api_key"], "one")
-        self.assertEqual(completion.call_args_list[1].kwargs["api_key"], "two")
+        self.assertEqual(client_class.call_args.kwargs["project"], "nixi-project")
+        self.assertEqual(client_class.call_args.kwargs["location"], "global")
 
-    def test_provider_errors_include_details_without_exposing_keys(self) -> None:
-        completion = MagicMock(side_effect=RuntimeError("quota failure for secret-key"))
-        fake_litellm = SimpleNamespace(completion=completion)
+    def test_google_search_can_be_disabled(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="I cannot check.")
 
         with (
-            patch.dict(os.environ, {"GOOGLE_API_KEY1": "secret-key"}, clear=True),
-            patch.dict(sys.modules, {"litellm": fake_litellm}),
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
         ):
-            chat = GeminiChat(LLMConfig())
+            chat = VertexChat(LLMConfig(google_search_enabled=False))
+            chat.reply("What is the latest news?")
+
+        request_config = client.models.generate_content.call_args.kwargs["config"]
+        self.assertIsNone(request_config.tools)
+
+    def test_requires_a_vertex_express_api_key(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "GOOGLE_CLOUD_API_KEY"):
+                VertexChat(LLMConfig())
+
+    def test_provider_errors_include_details_without_exposing_key(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.side_effect = RuntimeError(
+            "quota failure for vertex-key"
+        )
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig())
             with self.assertRaisesRegex(RuntimeError, "quota failure for \\[REDACTED\\]"):
                 chat.reply("Hello")
 
@@ -82,6 +122,25 @@ class SarvamTTSTests(unittest.TestCase):
         self.assertEqual(payload["target_language_code"], "en-IN")
         self.assertNotIn("sarvam-secret", request.data.decode())
         mocked_play.assert_called_once_with(response)
+
+    def test_stopping_during_http_read_is_a_clean_interruption(self) -> None:
+        speaker = SarvamSpeaker(TTSConfig(enabled=False))
+        response = MagicMock()
+        player = MagicMock()
+        player.stdin = MagicMock()
+        player.poll.return_value = None
+        player.wait.return_value = -15
+
+        def interrupted_read(_size: int) -> bytes:
+            speaker._stop_requested.set()
+            raise AttributeError("'NoneType' object has no attribute 'read'")
+
+        response.read.side_effect = interrupted_read
+        with patch("app.voice.tts.subprocess.Popen", return_value=player):
+            completed = speaker._play_stream(response)
+
+        self.assertFalse(completed)
+        player.terminate.assert_called_once()
 
 
 if __name__ == "__main__":

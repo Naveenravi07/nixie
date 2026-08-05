@@ -129,11 +129,14 @@ class SarvamSpeaker:
         except BrokenPipeError as error:
             if not self._stop_requested.is_set():
                 raise RuntimeError("PipeWire stopped during TTS playback.") from error
-        except (OSError, ValueError) as error:
+        # Closing HTTPResponse from stop() can race with http.client's chunked
+        # reader after it has cleared its internal file object. In that case it
+        # raises AttributeError instead of a normal I/O exception.
+        except (AttributeError, OSError, ValueError) as error:
             if not self._stop_requested.is_set():
                 raise RuntimeError("TTS audio streaming stopped unexpectedly.") from error
         finally:
-            with suppress(BrokenPipeError):
+            with suppress(BrokenPipeError, OSError, ValueError):
                 player.stdin.close()
             if self._stop_requested.is_set() and player.poll() is None:
                 player.terminate()

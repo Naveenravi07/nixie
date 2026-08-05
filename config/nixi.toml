@@ -23,23 +23,27 @@ max_utterance_seconds = 8
 command_timeout_seconds = 8
 calibration_ms = 1000
 adaptive_noise_ratio = 2.5
+# While Nixi is speaking, require louder, sustained speech before interrupting.
+barge_in_threshold_multiplier = 1.8
+barge_in_speech_start_ms = 300
 # Set this to a PipeWire node id or name to override the default microphone.
 microphone_target = ""
 
 [llm]
-model = "gemini-3.5-flash"
+model = "gemini-3.5-flash-lite"
 system_prompt = """You are Nixi, a concise and friendly desktop voice assistant.
 Answer naturally for speech and avoid Markdown unless asked."""
 max_tokens = 1024
 thinking_level = "minimal"
 timeout_seconds = 30
 history_turns = 8
-cooldown_seconds = 60
+# Allow Vertex AI to ground time-sensitive questions with Google Search.
+google_search_enabled = true
 
 [stt]
 enabled = true
 model = "saaras:v3-realtime"
-language = "auto"
+language = "en-IN"
 mode = "transcribe"
 stream_type = "fast"
 threshold = 0.3

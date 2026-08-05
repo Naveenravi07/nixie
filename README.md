@@ -15,7 +15,9 @@ sent to the configured LLM provider.
 - Shows a bottom-center GTK popup while it is listening.
 - Converts command speech to text.
 - Matches phrases to local actions from `config/nixi.toml`.
-- Falls back to Gemini through LiteLLM when no local action matches.
+- Falls back to Gemini 3.5 Flash-Lite through Vertex AI Express Mode when no local action matches.
+- Adds Google Search grounding only for time-sensitive questions such as weather,
+  news, closures, prices, and schedules.
 - Speaks responses with Sarvam TTS when enabled.
 - Exposes a small local HTTP API for messages and actions.
 
@@ -38,7 +40,7 @@ Nixi uses two dependency layers:
 2. Native Linux desktop bindings installed by the system package manager.
 
 `uv sync` installs the Python packages declared in `pyproject.toml`, such as
-LiteLLM, aiohttp, faster-whisper, and numpy.
+Google Gen AI, aiohttp, faster-whisper, and numpy.
 
 The popup is different. It uses GTK, PyGObject, PyCairo, librsvg, and optionally
 gtk-layer-shell. Those bindings are tied to your desktop stack and are loaded
@@ -80,23 +82,26 @@ the Cairo binding used by the popup launcher:
 /usr/bin/python3 -c "import cairo; print('cairo ok')"
 ```
 
-Copy the environment template and add your API keys:
+Copy the environment template and configure your Vertex AI Express Mode key and
+other provider keys:
 
 ```sh
 cp .env.example .env
 ```
 
 ```dotenv
-GOOGLE_API_KEY1=your-first-google-key
-GOOGLE_API_KEY2=your-second-google-key
-# Continue through GOOGLE_API_KEY10 when needed.
+GOOGLE_CLOUD_API_KEY=your-vertex-express-mode-key
+# Optional project-scoped Vertex configuration:
+# GOOGLE_CLOUD_PROJECT=your-project-id
+# GOOGLE_CLOUD_LOCATION=global
 SARVAM_API_KEY=your-sarvam-key
 ```
 
-`.env` is ignored by Git. Gemini requests run through LiteLLM and rotate across
-all configured Google keys. Failed keys are skipped for the configured cooldown,
-including rate-limit, authentication, and model-access errors. Sarvam uses only
-`SARVAM_API_KEY`.
+`.env` is ignored by Git. Gemini requests run through Vertex AI Express Mode
+using `GOOGLE_CLOUD_API_KEY`; restrict that key to the Vertex AI API in Google
+Cloud. To use the standard project-scoped endpoint instead of Express Mode, set
+both `GOOGLE_CLOUD_PROJECT` (the project ID, not display name) and
+`GOOGLE_CLOUD_LOCATION`. Sarvam uses only `SARVAM_API_KEY`.
 
 ## Run
 
@@ -126,6 +131,10 @@ uv run nixi-popup
 
 Edit [config/nixi.toml](config/nixi.toml) to configure wake phrases, audio
 thresholds, STT, TTS, model settings, and local actions.
+
+`llm.google_search_enabled` controls Vertex AI Google Search grounding. Keep it
+enabled for current-information questions; ordinary conversation does not invoke
+Search.
 
 Example action:
 

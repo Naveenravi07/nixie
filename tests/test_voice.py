@@ -77,6 +77,42 @@ class SegmenterTests(unittest.TestCase):
         self.assertIsNone(segmenter.push(silence))
         self.assertIsNone(segmenter.push(silence))
 
+    def test_barge_in_override_requires_louder_sustained_audio(self) -> None:
+        config = VoiceConfig(
+            speech_threshold=100,
+            speech_start_ms=100,
+            calibration_ms=0,
+        )
+        segmenter = UtteranceSegmenter(config, frame_ms=50)
+        room_noise = np.full(800, 150, dtype=np.int16)
+        loud_speech = np.full(800, 500, dtype=np.int16)
+
+        for _ in range(8):
+            self.assertIsNone(
+                segmenter.push(
+                    room_noise,
+                    threshold=180,
+                    speech_start_ms=300,
+                    update_noise_floor=False,
+                )
+            )
+        for _ in range(5):
+            segmenter.push(
+                loud_speech,
+                threshold=180,
+                speech_start_ms=300,
+                update_noise_floor=False,
+            )
+            self.assertFalse(segmenter.active_frames)
+
+        segmenter.push(
+            loud_speech,
+            threshold=180,
+            speech_start_ms=300,
+            update_noise_floor=False,
+        )
+        self.assertTrue(segmenter.active_frames)
+
 
 class ConversationTests(unittest.TestCase):
     def test_barge_in_stops_speaker_and_returns_followup(self) -> None:

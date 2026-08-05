@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.event_log import log_event
-from app.server.config import TTSConfig
+from app.config import TTSConfig
 
 
 SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech/stream"

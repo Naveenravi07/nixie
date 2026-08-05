@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+from datetime import date
 from typing import Any
 
 from tenacity import (
@@ -14,7 +15,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from .config import LLMConfig
+from app.config import LLMConfig
 
 
 _CURRENT_INFORMATION_PATTERN = re.compile(
@@ -25,10 +26,14 @@ _CURRENT_INFORMATION_PATTERN = re.compile(
     r"holiday|school closure|college closure|district collector|alert|warning|"
     r"price|stock|share price|market|crypto|bitcoin|exchange rate|"
     r"election|poll results?|current president|current prime minister|current ceo|"
-    r"who is|what is the status|when is|where is"
+    r"who is|what is the status|when is|where is|"
+    r"search(?: the)? web|search online|search it|web search|browse(?: the)? web|"
+    r"look it up|look up online|find online"
     r")\b",
     re.IGNORECASE,
 )
+
+_YEAR_PATTERN = re.compile(r"\b(20\d{2})\b")
 
 
 def _is_rate_limit_error(exception: BaseException) -> bool:
@@ -102,7 +107,10 @@ class VertexChat:
         """Use paid grounding only for prompts that need fresh world information."""
         if not self.config.google_search_enabled or not user_message:
             return False
-        return bool(_CURRENT_INFORMATION_PATTERN.search(user_message))
+        if _CURRENT_INFORMATION_PATTERN.search(user_message):
+            return True
+        recent_year = date.today().year - 1
+        return any(int(year) >= recent_year for year in _YEAR_PATTERN.findall(user_message))
 
     @retry(
         retry=retry_if_exception(_is_rate_limit_error),

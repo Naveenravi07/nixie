@@ -29,6 +29,11 @@ sent to the configured LLM provider.
 | Server | `uv run nixi-server` | Message routing, LLM replies, and configured action execution |
 | Popup | `uv run nixi-popup` | GTK desktop popup for Wayland and X11 |
 
+Internally, shared settings are exposed through `app.config`. Voice capture and
+segmentation, wake-word recognition, popup lifecycle, server transport, and the
+conversation state machine live in separate modules so each can be tested or
+changed independently.
+
 The voice process starts and closes the popup automatically. You can also run
 the popup directly when debugging the desktop UI.
 
@@ -149,6 +154,10 @@ Use `{name}` for a raw action argument and `{name:q}` for a shell-quoted value.
 If room noise triggers recording, increase `speech_threshold`. If quiet speech
 is missed, decrease it. Set `microphone_target` to a PipeWire node id or name
 from `wpctl status` when the default input is wrong.
+
+For interruptions while Nixi is speaking, tune `barge_in_threshold_multiplier`
+and `barge_in_speech_start_ms`. Lower values make interruption easier; higher
+values reject more speaker audio and room noise.
 
 The server exposes these endpoints on `127.0.0.1:8765` by default:
 

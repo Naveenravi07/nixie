@@ -6,12 +6,13 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from app.server.config import VoiceConfig
-from app.voice.main import (
-    NixiVoiceDaemon,
-    UtteranceSegmenter,
+from app.config import VoiceConfig
+from app.voice.audio import UtteranceSegmenter
+from app.voice.main import NixiVoiceDaemon
+from app.voice.recognition import (
     extract_wake_command,
     normalize_transcript,
+    resembles_spoken_text,
 )
 
 
@@ -38,6 +39,11 @@ class WakePhraseTests(unittest.TestCase):
         )
         self.assertTrue(woke)
         self.assertEqual(command, "hello")
+
+    def test_detects_tts_echo_fragments(self) -> None:
+        spoken = "Balan is a recent Malayalam movie with an interesting cast."
+        self.assertTrue(resembles_spoken_text("interesting Malayalam movie", spoken))
+        self.assertFalse(resembles_spoken_text("who directed it", spoken))
 
 
 class SegmenterTests(unittest.TestCase):
@@ -134,10 +140,16 @@ class ConversationTests(unittest.TestCase):
             def transcribe_pcm(self, _audio: object, _request_id: str) -> str:
                 return "Here is my follow-up"
 
+        class FakeLocalTranscriber:
+            def transcribe(self, _audio: object, _sample_rate: int) -> str:
+                return "Here is my follow-up"
+
         daemon = object.__new__(NixiVoiceDaemon)
-        daemon.voice = SimpleNamespace(command_timeout_seconds=0.01)
+        daemon.voice = SimpleNamespace(command_timeout_seconds=0.01, sample_rate=16_000)
         daemon.speaker = FakeSpeaker()
         daemon.sarvam_transcriber = FakeTranscriber()
+        daemon.transcriber = FakeLocalTranscriber()
+        daemon.segmenter = SimpleNamespace(reset=lambda: None)
         daemon.recorder = SimpleNamespace(frames=lambda: iter(()))
         daemon._capture_utterance = lambda **options: (
             options["on_speech_start"](),
@@ -149,6 +161,58 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(command, "Here is my follow-up")
         self.assertTrue(request_id)
         self.assertTrue(daemon.speaker.stopped)
+
+    def test_speaker_echo_opens_a_fresh_followup_window(self) -> None:
+        class FakeSpeaker:
+            def __init__(self) -> None:
+                self.released = threading.Event()
+
+            def speak(self, _text: str, request_id: str, started_event: object) -> bool:
+                started_event.set()
+                self.released.wait(timeout=1)
+                return False
+
+            def stop(self) -> None:
+                self.released.set()
+
+        class FakeLocalTranscriber:
+            def transcribe(self, audio: np.ndarray, _sample_rate: int) -> str:
+                return "A long spoken answer" if audio[0] == 1 else "My real question"
+
+        class FakeSarvamTranscriber:
+            def transcribe_pcm(self, audio: np.ndarray, _request_id: str) -> str:
+                self.audio = audio
+                return "My real question"
+
+        captures = iter(
+            [
+                np.ones(1600, dtype=np.int16),
+                np.full(1600, 2, dtype=np.int16),
+            ]
+        )
+
+        def capture(**options: object) -> np.ndarray:
+            audio = next(captures)
+            callback = options.get("on_speech_start")
+            if callback is not None:
+                callback()
+            return audio
+
+        daemon = object.__new__(NixiVoiceDaemon)
+        daemon.voice = SimpleNamespace(command_timeout_seconds=1, sample_rate=16_000)
+        daemon.speaker = FakeSpeaker()
+        daemon.transcriber = FakeLocalTranscriber()
+        daemon.sarvam_transcriber = FakeSarvamTranscriber()
+        daemon.segmenter = SimpleNamespace(reset=lambda: None)
+        daemon._capture_utterance = capture
+
+        command, _request_id = daemon._speak_and_listen(
+            "A long spoken answer",
+            "response-id",
+        )
+
+        self.assertEqual(command, "My real question")
+        self.assertEqual(daemon.sarvam_transcriber.audio[0], 2)
 
 
 if __name__ == "__main__":

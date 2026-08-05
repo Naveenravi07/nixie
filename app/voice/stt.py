@@ -15,7 +15,7 @@ import aiohttp
 import numpy as np
 
 from app.event_log import log_event
-from app.server.config import STTConfig
+from app.config import STTConfig
 
 
 SARVAM_REALTIME_STT_URL = "wss://api.sarvam.ai/speech-to-text-realtime/ws"

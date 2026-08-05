@@ -7,6 +7,7 @@ import argparse
 import json
 import time
 import uuid
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,7 +17,7 @@ from urllib.parse import unquote
 from app.environment import load_environment
 
 from .actions import ActionRegistry
-from .config import NixiConfig, load_config
+from app.config import NixiConfig, load_config
 from .llm import VertexChat
 from .server_log import ServerConsole
 
@@ -267,16 +268,13 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     if args.host is not None or args.port is not None:
-        config = NixiConfig(
-            server=type(config.server)(
+        config = replace(
+            config,
+            server=replace(
+                config.server,
                 host=args.host or config.server.host,
                 port=args.port or config.server.port,
             ),
-            voice=config.voice,
-            llm=config.llm,
-            stt=config.stt,
-            tts=config.tts,
-            actions=config.actions,
         )
 
     try:

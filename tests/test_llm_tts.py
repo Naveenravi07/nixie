@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.server.config import LLMConfig, TTSConfig
+from app.config import LLMConfig, TTSConfig
 from app.server.llm import VertexChat
 from app.voice.tts import SarvamSpeaker
 
@@ -45,6 +46,34 @@ class VertexChatTests(unittest.TestCase):
 
         request_config = client.models.generate_content.call_args.kwargs["config"]
         self.assertEqual(len(request_config.tools), 1)
+        self.assertIsNotNone(request_config.tools[0].google_search)
+
+    def test_explicit_web_search_request_enables_grounding(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="Search result.")
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig())
+            chat.reply("Please search it online.")
+
+        request_config = client.models.generate_content.call_args.kwargs["config"]
+        self.assertIsNotNone(request_config.tools[0].google_search)
+
+    def test_recent_release_year_enables_grounding(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="Search result.")
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig())
+            chat.reply(f"Tell me about the movie released in {date.today().year}.")
+
+        request_config = client.models.generate_content.call_args.kwargs["config"]
         self.assertIsNotNone(request_config.tools[0].google_search)
 
     def test_uses_project_and_location_together_when_configured(self) -> None:

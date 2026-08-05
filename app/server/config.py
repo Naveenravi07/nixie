@@ -41,8 +41,8 @@ class VoiceConfig:
     command_timeout_seconds: float = 8.0
     calibration_ms: int = 1_000
     adaptive_noise_ratio: float = 2.5
-    barge_in_threshold_multiplier: float = 1.8
-    barge_in_speech_start_ms: int = 300
+    barge_in_threshold_multiplier: float = 1.6
+    barge_in_speech_start_ms: int = 200
     microphone_target: str = ""
 
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from string import Formatter
 from typing import Any
 
-from .config import ActionConfig
+from app.config import ActionConfig
 
 
 @dataclass(frozen=True)

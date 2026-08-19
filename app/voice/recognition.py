@@ -47,39 +47,3 @@ def resembles_spoken_text(captured: str, spoken: str) -> bool:
         SequenceMatcher(None, captured_text, window).ratio() >= 0.70
         for window in windows
     )
-
-
-class WhisperTranscriber:
-    """Small local Whisper adapter used for wake-phrase recognition."""
-
-    def __init__(self, config: VoiceConfig) -> None:
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError as error:
-            raise RuntimeError(
-                "faster-whisper is not installed; run the voice dependency setup from README.md"
-            ) from error
-
-        print(f"Loading local Whisper model {config.model!r} (CPU int8)...", flush=True)
-        self.language = config.language or None
-        self.hotwords = ", ".join(config.wake_phrases[:2])
-        self.model = WhisperModel(config.model, device="cpu", compute_type="int8")
-
-    def transcribe(self, pcm: np.ndarray, sample_rate: int) -> str:
-        if sample_rate != 16_000:
-            raise ValueError("Whisper input must currently use a 16000 Hz sample rate")
-        audio = pcm.astype(np.float32) / 32768.0
-        segments, _info = self.model.transcribe(
-            audio,
-            language=self.language,
-            beam_size=1,
-            best_of=1,
-            condition_on_previous_text=False,
-            hotwords=self.hotwords,
-            no_repeat_ngram_size=3,
-            repetition_penalty=1.1,
-            temperature=0.0,
-            without_timestamps=True,
-            vad_filter=False,
-        )
-        return " ".join(segment.text.strip() for segment in segments).strip()

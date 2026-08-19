@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -15,7 +16,14 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from app.config import LLMConfig
+from app.config import ActionConfig, LLMConfig
+
+
+@dataclass
+class ToolCall:
+    """Returned by reply_with_tools() when the LLM wants to run an action."""
+    name: str
+    args: dict[str, Any]
 
 
 _CURRENT_INFORMATION_PATTERN = re.compile(
@@ -103,6 +111,55 @@ class VertexChat:
             self._trim_history()
             return content
 
+    def reply_with_tools(
+        self,
+        user_message: str,
+        actions: dict[str, ActionConfig],
+        request_id: str = "standalone",
+    ) -> tuple[str, ToolCall | None]:
+        """
+        Send user_message to the LLM with action function declarations.
+        Returns (spoken_response, tool_call_or_None).
+
+        If the LLM decides an action is needed it returns a ToolCall.
+        The spoken_response is always a natural language string suitable for TTS.
+        """
+        with self.lock:
+            tools = _build_function_declarations(actions)
+            request_messages = [*self.messages, {"role": "user", "content": user_message}]
+
+            response = self._complete(
+                request_messages,
+                use_google_search=False,   # tool calls and search grounding cannot coexist
+                tools=tools if tools else None,
+            )
+
+            # Check if the LLM returned a function call
+            tool_call = _extract_tool_call(response)
+
+            if tool_call is not None:
+                # LLM wants to run an action — build a short spoken confirmation
+                action = actions.get(tool_call.name)
+                spoken = f"Sure, running {tool_call.name.replace('_', ' ')}."
+                if action and action.description:
+                    spoken = action.description.split(".")[0] + "."
+                # Add both turns to history so context is preserved
+                self.messages.extend([
+                    {"role": "user", "content": user_message},
+                    {"role": "model", "content": spoken},
+                ])
+            else:
+                spoken = self._response_text(response)
+                if not spoken:
+                    raise RuntimeError("Gemini returned an empty response.")
+                self.messages.extend([
+                    {"role": "user", "content": user_message},
+                    {"role": "model", "content": spoken},
+                ])
+
+            self._trim_history()
+            return spoken, tool_call
+
     def should_use_google_search(self, user_message: str) -> bool:
         """Use paid grounding only for prompts that need fresh world information."""
         if not self.config.google_search_enabled or not user_message:
@@ -140,6 +197,7 @@ class VertexChat:
         messages: list[dict[str, str]],
         *,
         use_google_search: bool = False,
+        tools: list[dict[str, Any]] | None = None,
     ) -> Any:
         config_options: dict[str, Any] = {
             "system_instruction": self.config.system_prompt,
@@ -157,12 +215,15 @@ class VertexChat:
             config_options["tools"] = [
                 self._types.Tool(google_search=self._types.GoogleSearch())
             ]
+        elif tools:
+            # Add tool definitions to the LLM config
+            config_options["tools"] = [{"function_declarations": tools}]
 
         try:
             return self._complete_with_retry(messages, config_options)
         except Exception as error:
             # Fallback: If 429 rate limit is triggered by search grounding, strip tools & retry plain completion
-            if use_google_search and _is_rate_limit_error(error):
+            if (use_google_search or tools) and _is_rate_limit_error(error):
                 config_options.pop("tools", None)
                 try:
                     return self._complete_with_retry(messages, config_options)
@@ -185,3 +246,76 @@ class VertexChat:
     def _response_text(response: Any) -> str:
         content = getattr(response, "text", None)
         return content.strip() if isinstance(content, str) else ""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _build_function_declarations(actions: dict[str, ActionConfig]) -> list[dict[str, Any]]:
+    """
+    Convert ActionConfig entries into Gemini function declarations.
+    Inspects the command template for {path} and {amount} placeholders
+    and exposes them as typed parameters so the LLM can extract them
+    from the user's natural language message.
+    """
+    declarations = []
+    for name, action in actions.items():
+        if not action.command:
+            continue
+
+        description = action.description or f"Runs the {name.replace('_', ' ')} action."
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+
+        if "{path}" in action.command:
+            properties["path"] = {
+                "type": "string",
+                "description": "Full filesystem path required for this action.",
+            }
+            required.append("path")
+
+        if "{amount}" in action.command:
+            properties["amount"] = {
+                "type": "string",
+                "description": (
+                    "The amount for this action, e.g. '5%+', '20%-', '30%+'. "
+                    "Read this from the user's message. "
+                    "If not specified, use '5%+' for increase actions and '5%-' for decrease actions."
+                ),
+            }
+            required.append("amount")
+
+        declarations.append({
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        })
+
+    return declarations
+
+
+def _extract_tool_call(response: Any) -> ToolCall | None:
+    """
+    Inspect a Gemini API response object for a function call.
+    Returns a ToolCall if found, None otherwise.
+    """
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                fc = getattr(part, "function_call", None)
+                if fc is not None:
+                    name = getattr(fc, "name", None)
+                    args = dict(getattr(fc, "args", {}) or {})
+                    if name:
+                        return ToolCall(name=name, args=args)
+    except Exception:
+        pass
+    return None

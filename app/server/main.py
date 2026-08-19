@@ -76,58 +76,70 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
             return
 
         request_id = str(payload.get("request_id", "")).strip() or self._request_id
-        action = self.server.actions.find_for_message(message)
-        if action is None:
-            self._is_llm_call = True
-            grounded = self.server.chat.should_use_google_search(message)
-            started = time.perf_counter()
-            try:
-                response = self.server.chat.reply(message, request_id=request_id)
-            except RuntimeError as error:
-                self.server.console.llm_call(
-                    request_id=request_id,
-                    model=self.server.config.llm.model,
-                    prompt=message,
-                    duration_ms=round((time.perf_counter() - started) * 1000),
-                    response=str(error),
-                    error=True,
-                    grounded=grounded,
-                )
-                self._send_error(HTTPStatus.BAD_GATEWAY, str(error))
-                return
+        self._is_llm_call = True
+        grounded = self.server.chat.should_use_google_search(message)
+        started = time.perf_counter()
+
+        try:
+            spoken, tool_call = self.server.chat.reply_with_tools(
+                message,
+                self.server.config.actions,
+                request_id=request_id,
+            )
+        except RuntimeError as error:
             self.server.console.llm_call(
                 request_id=request_id,
                 model=self.server.config.llm.model,
                 prompt=message,
                 duration_ms=round((time.perf_counter() - started) * 1000),
-                response=response,
-                grounded=grounded,
+                response=str(error),
+                error=True,
+                grounded=False,
             )
-            self._send_json(
-                {
-                    "request_id": request_id,
-                    "transcript": message,
-                    "response": response,
-                    "action": None,
-                }
-            )
+            self._send_error(HTTPStatus.BAD_GATEWAY, str(error))
             return
 
-        try:
-            result = self.server.actions.run(action.name, payload.get("args", {}))
-        except ValueError as error:
-            self._send_error(HTTPStatus.BAD_REQUEST, str(error))
-            return
+        # LLM decided to run an action
+        if tool_call is not None:
+            action_result = None
+            try:
+                action_result = self.server.actions.run(tool_call.name, tool_call.args)
+                if not action_result.ok:
+                    spoken = f"{tool_call.name.replace('_', ' ')} failed."
+            except (KeyError, ValueError) as error:
+                spoken = f"Could not run {tool_call.name.replace('_', ' ')}: {error}"
 
-        response = f"Ran {action.name}." if result.ok else f"{action.name} failed."
-        self._send_json(
-            {
+            self.server.console.llm_call(
+                request_id=request_id,
+                model=self.server.config.llm.model,
+                prompt=message,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                response=f"[tool: {tool_call.name}] {spoken}",
+                grounded=False,
+            )
+            self._send_json({
                 "request_id": request_id,
                 "transcript": message,
-                "response": response,
-                "action": result.to_dict(),
-            }
+                "response": spoken,
+                "action": action_result.to_dict() if action_result else None,
+            })
+            return
+
+        # Plain chat response — no action
+        self.server.console.llm_call(
+            request_id=request_id,
+            model=self.server.config.llm.model,
+            prompt=message,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            response=spoken,
+            grounded=grounded,
         )
+        self._send_json({
+            "request_id": request_id,
+            "transcript": message,
+            "response": spoken,
+            "action": None,
+        })
 
     def _handle_action(self, action_name: str) -> None:
         if not action_name:
@@ -260,12 +272,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, help="path to nixi.toml")
     parser.add_argument("--host", help="override configured host")
     parser.add_argument("--port", type=int, help="override configured port")
+    parser.add_argument(
+        "--discover",
+        action="store_true",
+        help=(
+            "Probe the desktop environment, scan script directories, and "
+            "auto-generate the [actions] block in nixi.toml, then exit."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     load_environment()
     args = parse_args()
+
+    if args.discover:
+        from .discovery import run_discovery
+        from app.config import DEFAULT_CONFIG_PATH
+        config_path = args.config or DEFAULT_CONFIG_PATH
+        run_discovery(config_path)
+        return
+
     config = load_config(args.config)
     if args.host is not None or args.port is not None:
         config = replace(

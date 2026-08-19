@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import queue
 import signal
+import socket
 import sys
 import threading
 import time
@@ -31,7 +33,6 @@ class NixiVoiceDaemon:
         self.segmenter = voice_audio.UtteranceSegmenter(self.voice)
         self.recorder = voice_audio.PipeWireRecorder(self.voice)
         self.popup = VoicePopupController()
-        self.transcriber = voice_recognition.WhisperTranscriber(self.voice)
         self.sarvam_transcriber = SarvamRealtimeTranscriber(
             self.config.stt,
             self.voice.sample_rate,
@@ -41,185 +42,134 @@ class NixiVoiceDaemon:
         self.awaiting_command = False
         self.command_deadline = 0.0
         self.running = True
+        self.trigger_event = threading.Event()
+        self.manual_recording = False
+        self.manual_frames: list[np.ndarray] = []
+        self.popup_close_timer: threading.Timer | None = None
+        self.followup_stop_event: threading.Event | None = None
+        self._start_trigger_server()
+
+    def _start_trigger_server(self) -> None:
+        def server_loop() -> None:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("127.0.0.1", 8768))
+                    s.listen()
+                    while self.running:
+                        s.settimeout(0.5)
+                        try:
+                            conn, addr = s.accept()
+                        except socket.timeout:
+                            continue
+                        with conn:
+                            data = conn.recv(1024)
+                            if b"trigger" in data:
+                                self.trigger_event.set()
+                except Exception as e:
+                    print(f"Trigger server error: {e}", file=sys.stderr)
+        
+        t = threading.Thread(target=server_loop, daemon=True, name="nixi-trigger-server")
+        t.start()
 
     def run(self) -> None:
+        self.recorder.start()
         print(
-            f"Starting microphone calibration ({self.voice.calibration_ms / 1000:g}s); "
-            "keep quiet...",
+            "Nixi trigger listener ready. Use the Google command/shortcut to start/stop recording.",
             flush=True,
         )
-        self.recorder.start()
-        announced_ready = False
         try:
-            for frame in self.recorder.frames():
-                if not self.running:
-                    break
-                if self.segmenter.calibrated and not announced_ready:
-                    print(
-                        f"Nixi is ready. Say {self.voice.wake_phrases[0]!r}. "
-                        f"Speech threshold: {self.segmenter.effective_threshold:.0f}",
-                        flush=True,
-                    )
-                    announced_ready = True
-                self._expire_command_window()
-                utterance = self.segmenter.push(frame)
-                if utterance is not None:
-                    self._handle_utterance(utterance)
+            while self.running:
+                if self.trigger_event.is_set():
+                    self.trigger_event.clear()
+                    self._handle_manual_trigger()
+                
+                if self.manual_recording:
+                    try:
+                        frame = self.recorder.frame_queue.get(timeout=0.1)
+                        if frame is not None:
+                            self.manual_frames.append(frame)
+                    except queue.Empty:
+                        continue
+                else:
+                    time.sleep(0.05)
         finally:
             self.popup.close()
             self.recorder.stop()
 
-    def stop(self, *_args: object) -> None:
-        self.running = False
-        self.recorder.stop()
-
-    def _handle_utterance(self, utterance: np.ndarray) -> None:
-        started = time.perf_counter()
-        transcript = self.transcriber.transcribe(utterance, self.voice.sample_rate)
-        inference_seconds = time.perf_counter() - started
-        if not transcript:
-            return
-        audio_seconds = utterance.size / self.voice.sample_rate
-        print(
-            f"Heard [{audio_seconds:.1f}s audio, {inference_seconds:.2f}s STT]: {transcript}",
-            flush=True,
-        )
-
-        woke, inline_command = voice_recognition.extract_wake_command(
-            transcript,
-            self.voice.wake_phrases,
-        )
-        if not self.awaiting_command:
-            if not woke:
-                return
+    def _handle_manual_trigger(self) -> None:
+        if not self.manual_recording:
+            # Interrupt active speaker and stop any ongoing auto follow-up
+            if self.followup_stop_event is not None:
+                self.followup_stop_event.set()
+                self.followup_stop_event = None
+            if self.popup_close_timer is not None:
+                self.popup_close_timer.cancel()
+                self.popup_close_timer = None
+            self.speaker.stop()
+            self.recorder.discard_pending()
+            self.manual_recording = True
+            self.manual_frames = []
             self.popup.open()
-            if self.config.stt.enabled:
-                self._handle_sarvam_command(utterance, inline_command)
-                return
-            if inline_command:
-                self._process_command(inline_command)
-            else:
-                self.awaiting_command = True
-                self.command_deadline = time.monotonic() + self.voice.command_timeout_seconds
-            return
+            print("Recording started...", flush=True)
+        else:
+            # Stop recording and process
+            self.manual_recording = False
+            print("Recording stopped. Processing...", flush=True)
+            if self.manual_frames:
+                utterance = np.concatenate(self.manual_frames)
+                self.manual_frames = []
+                # Process the command in a background thread to keep trigger responsive
+                t = threading.Thread(
+                    target=self._process_manual_utterance,
+                    args=(utterance,),
+                    daemon=True,
+                )
+                t.start()
 
-        command = (
-            inline_command
-            if woke and inline_command
-            else voice_recognition.normalize_transcript(transcript)
+    def _schedule_popup_close(self) -> None:
+        if self.popup_close_timer is not None:
+            self.popup_close_timer.cancel()
+        
+        def close_action() -> None:
+            if not self.manual_recording and self.followup_stop_event is None:
+                print("No follow-up detected. Closing popup.", flush=True)
+                self.popup.close()
+        
+        self.popup_close_timer = threading.Timer(
+            self.voice.command_timeout_seconds,
+            close_action,
         )
-        if command:
-            self._process_command(command)
+        self.popup_close_timer.daemon = True
+        self.popup_close_timer.start()
 
-    def _handle_sarvam_command(
-        self,
-        wake_utterance: np.ndarray,
-        whisper_inline_command: str,
-    ) -> None:
+    def _process_manual_utterance(self, utterance: np.ndarray) -> None:
         request_id = uuid.uuid4().hex[:12]
         try:
-            if whisper_inline_command:
-                transcript = self.sarvam_transcriber.transcribe_pcm(
-                    wake_utterance,
-                    request_id,
-                )
-                woke, sarvam_command = voice_recognition.extract_wake_command(
-                    transcript,
-                    self.voice.wake_phrases,
-                )
-                command = sarvam_command if woke and sarvam_command else whisper_inline_command
-            else:
-                print("Listening for command...", flush=True)
-                command_audio = self._capture_utterance(
-                    timeout_seconds=self.config.stt.timeout_seconds,
-                )
-                if command_audio is None:
-                    print("Listening timed out.", flush=True)
-                    self.popup.close()
-                    return
-                command = self.sarvam_transcriber.transcribe_pcm(
-                    command_audio,
-                    request_id,
-                )
-        except RuntimeError as error:
-            log_event("voice", "sarvam_stt.failed", request_id, error=str(error))
-            print("Sarvam STT failed; falling back to local Whisper.", file=sys.stderr)
-            self.awaiting_command = True
-            self.command_deadline = time.monotonic() + self.voice.command_timeout_seconds
+            print("Transcribing with Sarvam...", flush=True)
+            command = self.sarvam_transcriber.transcribe_pcm(utterance, request_id)
+        except Exception as error:
+            log_event("voice", "stt.failed", request_id, error=str(error))
+            print(f"STT failed: {error}", file=sys.stderr)
+            self._schedule_popup_close()
             return
 
-        if command.strip():
-            self._process_command(command.strip(), request_id=request_id)
+        command = command.strip()
+        if not command:
+            print("No speech detected.", flush=True)
+            self._schedule_popup_close()
             return
 
-        print("Sarvam did not detect a command.", flush=True)
-        self.popup.close()
+        print(f"Heard: {command}", flush=True)
+        self._execute_command_turn(command, request_id)
 
-    def _capture_utterance(
-        self,
-        *,
-        timeout_seconds: float,
-        stop_event: threading.Event | None = None,
-        on_speech_start: Callable[[], None] | None = None,
-        barge_in_until: threading.Event | None = None,
-    ) -> np.ndarray | None:
-        """Capture one locally segmented utterance from the live recorder."""
-        deadline = time.monotonic() + timeout_seconds
-        notified_start = False
-        was_barge_in_mode = barge_in_until is not None and not barge_in_until.is_set()
-        for frame in self.recorder.frames():
-            if not self.running or (stop_event is not None and stop_event.is_set()):
-                return None
-            barge_in_mode = (
-                barge_in_until is not None
-                and (not barge_in_until.is_set() or notified_start)
-            )
-            if was_barge_in_mode and not barge_in_mode:
-                # Drop audio buffered from Nixi's own voice before opening the
-                # normal-sensitivity follow-up window.
-                self.segmenter.reset()
-            was_barge_in_mode = barge_in_mode
-            was_active = bool(self.segmenter.active_frames)
-            utterance = self.segmenter.push(
-                frame,
-                threshold=(
-                    self.segmenter.effective_threshold
-                    * self.voice.barge_in_threshold_multiplier
-                    if barge_in_mode
-                    else None
-                ),
-                speech_start_ms=(
-                    self.voice.barge_in_speech_start_ms if barge_in_mode else None
-                ),
-                update_noise_floor=not barge_in_mode,
-            )
-            if not notified_start and not was_active and self.segmenter.active_frames:
-                notified_start = True
-                if on_speech_start is not None:
-                    on_speech_start()
-            if utterance is not None:
-                return utterance
-            if time.monotonic() >= deadline:
-                self.segmenter.reset()
-                return None
-        return None
+    def _execute_command_turn(self, command: str, request_id: str) -> None:
+        response_text = self._request_response(command, request_id)
+        if response_text is None:
+            self._schedule_popup_close()
+            return
 
-    def _process_command(self, command: str, request_id: str | None = None) -> None:
-        self.awaiting_command = False
-        request_id = request_id or uuid.uuid4().hex[:12]
-        try:
-            while command and self.running:
-                response_text = self._request_response(command, request_id)
-                if response_text is None:
-                    return
-                command, request_id = self._speak_and_listen(response_text, request_id)
-                self.recorder.discard_pending()
-                self.segmenter.reset()
-        finally:
-            self.awaiting_command = False
-            self.recorder.discard_pending()
-            self.segmenter.reset()
-            self.popup.close()
+        self._speak_and_listen_live(response_text, request_id)
 
     def _request_response(self, command: str, request_id: str) -> str | None:
         server_started = time.perf_counter()
@@ -237,127 +187,161 @@ class NixiVoiceDaemon:
             )
             return None
 
-    def _speak_and_listen(
-        self,
-        response_text: str,
-        response_request_id: str,
-    ) -> tuple[str, str]:
-        """Speak a response while listening for barge-in or a follow-up turn."""
-        listen_request_id = uuid.uuid4().hex[:12]
-        stop_listening = threading.Event()
-        tts_ready = threading.Event()
+    def _speak_and_listen_live(self, response_text: str, parent_request_id: str) -> None:
+        request_id = uuid.uuid4().hex[:12]
+        self.followup_stop_event = threading.Event()
+        stop_event = self.followup_stop_event
+        
         tts_finished = threading.Event()
-        speech_started = threading.Event()
         interrupted_tts = threading.Event()
+        
+        self.recorder.discard_pending()
+        self.segmenter.reset()
 
-        def finish_followup_window() -> None:
-            timer = threading.Timer(
-                self.voice.command_timeout_seconds,
-                stop_listening.set,
-            )
-            timer.daemon = True
-            timer.start()
-
-        def speak_response() -> None:
+        def play_tts() -> None:
             try:
-                self.speaker.speak(
-                    response_text,
-                    request_id=response_request_id,
-                    started_event=tts_ready,
-                )
-            except RuntimeError as error:
-                log_event("voice", "sarvam.failed", response_request_id, error=str(error))
+                self.speaker.speak(response_text, request_id=parent_request_id)
             finally:
                 tts_finished.set()
-                finish_followup_window()
+        
+        tts_thread = threading.Thread(target=play_tts, name="nixi-tts", daemon=True)
+        tts_thread.start()
 
         def handle_speech_start() -> None:
-            if speech_started.is_set():
-                return
-            speech_started.set()
             if not tts_finished.is_set():
+                print("Barge-in speech start detected. Interrupting TTS...", flush=True)
                 interrupted_tts.set()
-            log_event(
-                "voice",
-                "followup.detected" if tts_finished.is_set() else "barge_in.detected",
-                listen_request_id,
-            )
-            self.speaker.stop()
-
-        speaker_thread = threading.Thread(
-            target=speak_response,
-            name="nixi-tts",
-            daemon=True,
-        )
-        speaker_thread.start()
-        tts_ready.wait(timeout=1)
-
-        local_command = ""
-        try:
-            followup_audio = self._capture_utterance(
-                timeout_seconds=300,
-                stop_event=stop_listening,
-                on_speech_start=handle_speech_start,
-                barge_in_until=tts_finished,
-            )
-            local_command = self._local_transcript(followup_audio)
-            if (
-                followup_audio is not None
-                and interrupted_tts.is_set()
-                and voice_recognition.resembles_spoken_text(local_command, response_text)
-            ):
-                log_event("voice", "barge_in.echo_ignored", listen_request_id)
-                print("Ignored speaker echo; listening for your command...", flush=True)
-                self.segmenter.reset()
-                followup_audio = self._capture_utterance(
-                    timeout_seconds=self.voice.command_timeout_seconds,
-                    stop_event=stop_listening,
-                )
-                local_command = self._local_transcript(followup_audio)
-            next_command = (
-                self.sarvam_transcriber.transcribe_pcm(
-                    followup_audio,
-                    listen_request_id,
-                )
-                if followup_audio is not None
-                else ""
-            )
-        except RuntimeError as error:
-            log_event("voice", "sarvam_stt.failed", listen_request_id, error=str(error))
-            next_command = local_command
-        finally:
-            stop_listening.set()
-            if speech_started.is_set():
                 self.speaker.stop()
-            speaker_thread.join(timeout=5)
 
-        return next_command.strip(), listen_request_id
+        deadline = time.monotonic() + 45.0
+        
+        def frame_gen() -> Iterator[np.ndarray]:
+            post_tts_deadline = None
+            while not stop_event.is_set() and time.monotonic() < deadline and self.running:
+                if tts_finished.is_set() and post_tts_deadline is None:
+                    post_tts_deadline = time.monotonic() + 10.0
+                
+                if post_tts_deadline is not None and time.monotonic() >= post_tts_deadline:
+                    break
+                
+                try:
+                    frame = self.recorder.frame_queue.get(timeout=0.1)
+                    if frame is not None:
+                        yield frame
+                except queue.Empty:
+                    continue
 
-    def _local_transcript(self, audio: np.ndarray | None) -> str:
-        """Produce a local fallback transcript without failing the conversation."""
-        if audio is None:
-            return ""
         try:
-            return self.transcriber.transcribe(audio, self.voice.sample_rate).strip()
-        except (RuntimeError, ValueError):
-            return ""
+            print("Speaking and listening for interruption/follow-up...", flush=True)
+            command = self.sarvam_transcriber.transcribe_live(
+                frame_gen(),
+                request_id,
+                stop_event=stop_event,
+                on_speech_start=handle_speech_start,
+                timeout_seconds=45.0,
+            )
+        except Exception as error:
+            print(f"Live interaction finished/timed out: {error}", flush=True)
+            self.followup_stop_event = None
+            self._schedule_popup_close()
+            return
 
-    def _expire_command_window(self) -> None:
-        if self.awaiting_command and time.monotonic() >= self.command_deadline:
-            print("Listening timed out.", flush=True)
-            self.awaiting_command = False
-            self.popup.close()
+        self.followup_stop_event = None
+        command = command.strip()
+        
+        if not command:
+            print("No speech detected.", flush=True)
+            self._schedule_popup_close()
+            return
+
+        if interrupted_tts.is_set() and voice_recognition.resembles_spoken_text(command, response_text):
+            print("Ignored speaker echo; listening for your command...", flush=True)
+            self._run_auto_followup(parent_request_id)
+            return
+
+        print(f"Heard follow-up/interrupt: {command}", flush=True)
+        self._execute_command_turn(command, request_id)
+
+    def _run_auto_followup(self, parent_request_id: str) -> None:
+        request_id = uuid.uuid4().hex[:12]
+        self.followup_stop_event = threading.Event()
+        stop_event = self.followup_stop_event
+        deadline = time.monotonic() + 10.0
+        
+        # Discard frames from the queue before beginning the follow-up capture
+        self.recorder.discard_pending()
+        self.segmenter.reset()
+
+        def frame_gen() -> Iterator[np.ndarray]:
+            while not stop_event.is_set() and time.monotonic() < deadline and self.running:
+                try:
+                    frame = self.recorder.frame_queue.get(timeout=0.1)
+                    if frame is None:
+                        break
+                    yield frame
+                except queue.Empty:
+                    continue
+
+        try:
+            print("AI finished speaking. Listening automatically for follow-up...", flush=True)
+            command = self.sarvam_transcriber.transcribe_live(
+                frame_gen(),
+                request_id,
+                stop_event=stop_event,
+                timeout_seconds=10.0,
+            )
+        except Exception as error:
+            print(f"Sarvam live follow-up finished/timed out: {error}", flush=True)
+            self.followup_stop_event = None
+            self._schedule_popup_close()
+            return
+
+        self.followup_stop_event = None
+        command = command.strip()
+        if not command:
+            print("No follow-up speech detected.", flush=True)
+            self._schedule_popup_close()
+            return
+
+        print(f"Heard follow-up: {command}", flush=True)
+        response_text = self._request_response(command, request_id)
+        if response_text is None:
+            self._schedule_popup_close()
+            return
+
+        print(f"Speaking response: {response_text}", flush=True)
+        completed = self.speaker.speak(response_text, request_id=request_id)
+        if completed:
+            self._run_auto_followup(request_id)
+        else:
+            self._schedule_popup_close()
+
+    def stop(self) -> None:
+        self.running = False
+        self.recorder.stop()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the always-on local Nixi voice daemon.")
     parser.add_argument("--config", type=Path, help="path to nixi.toml")
+    parser.add_argument("--trigger", action="store_true", help="Send a trigger to the running voice daemon")
     return parser.parse_args()
 
 
 def main() -> None:
-    load_environment()
     args = parse_args()
+    if args.trigger:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect(("127.0.0.1", 8768))
+                s.sendall(b"trigger\n")
+            print("Trigger sent successfully.", flush=True)
+            return
+        except Exception as error:
+            print(f"Failed to send trigger to voice daemon: {error}", file=sys.stderr)
+            sys.exit(1)
+
+    load_environment()
     try:
         daemon = NixiVoiceDaemon(args.config)
     except RuntimeError as error:

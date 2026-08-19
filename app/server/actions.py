@@ -2,12 +2,59 @@
 
 from __future__ import annotations
 
+import random
 import subprocess
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from string import Formatter
 from typing import Any
 
 from app.config import ActionConfig
+
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
+
+# Paths
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PROFILE_PATH = _REPO_ROOT / "config" / "nixi-profile.toml"
+
+# Directories searched in order as fallback when no profile is available
+_WALLPAPER_SEARCH_DIRS = [
+    Path.home() / "Pictures" / "walls",
+    Path.home() / "Pictures" / "wallpapers",
+    Path.home() / "Pictures",
+    Path.home() / "Wallpapers",
+]
+
+
+def _find_random_wallpaper() -> str | None:
+    """
+    Read from nixi-profile.toml's wallpaper file list if available.
+    Otherwise, scan well-known picture directories as fallback.
+    """
+    # 1. Try reading from discovered wallpapers in nixi-profile.toml
+    if _PROFILE_PATH.exists():
+        try:
+            with _PROFILE_PATH.open("rb") as f:
+                profile = tomllib.load(f)
+            files = profile.get("wallpapers", {}).get("files", [])
+            if files:
+                return random.choice(files)
+        except Exception:
+            pass
+
+    # 2. Fallback: Scan directories manually
+    candidates: list[Path] = []
+    for directory in _WALLPAPER_SEARCH_DIRS:
+        if not directory.is_dir():
+            continue
+        for f in directory.rglob("*"):
+            if f.is_file() and f.suffix.lower() in _IMAGE_EXTENSIONS:
+                candidates.append(f)
+        if candidates:
+            break
+
+    return str(random.choice(candidates)) if candidates else None
 
 
 @dataclass(frozen=True)
@@ -47,21 +94,6 @@ class ActionRegistry:
             for action in self.actions.values()
         ]
 
-    def find_for_message(self, message: str) -> ActionConfig | None:
-        normalized = message.strip().lower()
-        if not normalized:
-            return None
-
-        for action in self.actions.values():
-            if normalized == action.name.replace("_", " "):
-                return action
-            if normalized == action.name:
-                return action
-            if any(trigger in normalized for trigger in action.triggers):
-                return action
-
-        return None
-
     def run(self, name: str, args: dict[str, Any] | None = None) -> ActionResult:
         action = self.actions.get(name)
         if action is None:
@@ -69,7 +101,8 @@ class ActionRegistry:
         if not action.command:
             raise ValueError(f"Action has no command: {name}")
 
-        command = render_command(action.command, args or {})
+        resolved_args = self._resolve_args(name, action, dict(args or {}))
+        command = render_command(action.command, resolved_args)
         completed = subprocess.run(
             command,
             shell=True,
@@ -84,6 +117,33 @@ class ActionRegistry:
             stdout=completed.stdout.strip(),
             stderr=completed.stderr.strip(),
         )
+
+    def _resolve_args(
+        self, name: str, action: ActionConfig, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Fill in missing or empty arguments before command rendering.
+
+        set_wallpaper + missing/empty path  → pick a random image from ~/Pictures
+        volume_up/down + missing amount     → default to 5%+/5%-
+        brightness_up/down + missing amount → default to 5%+/5%-
+        """
+        # Wallpaper: auto-discover an image if path was not provided
+        if name == "set_wallpaper" and not args.get("path", "").strip():
+            found = _find_random_wallpaper()
+            if found is None:
+                raise ValueError(
+                    "No wallpaper path given and no images found in ~/Pictures."
+                )
+            args["path"] = found
+
+        # Volume / brightness: default amount if missing
+        if name in ("volume_up", "brightness_up") and not args.get("amount", "").strip():
+            args["amount"] = "5%+"
+        if name in ("volume_down", "brightness_down") and not args.get("amount", "").strip():
+            args["amount"] = "5%-"
+
+        return args
 
 
 def render_command(template: str, args: dict[str, Any]) -> str:
@@ -103,6 +163,5 @@ class ShellCommandFormatter(Formatter):
     def format_field(self, value: Any, format_spec: str) -> str:
         if format_spec == "q":
             import shlex
-
             return shlex.quote(str(value))
         return super().format_field(value, format_spec)

@@ -34,15 +34,15 @@ class VoiceConfig:
     language: str = "en"
     sample_rate: int = 16_000
     speech_threshold: int = 500
-    silence_ms: int = 400
+    silence_ms: int = 700
     speech_start_ms: int = 150
     min_speech_ms: int = 250
     max_utterance_seconds: float = 8.0
     command_timeout_seconds: float = 8.0
     calibration_ms: int = 1_000
     adaptive_noise_ratio: float = 2.5
-    barge_in_threshold_multiplier: float = 1.6
-    barge_in_speech_start_ms: int = 200
+    barge_in_threshold_multiplier: float = 1.2
+    barge_in_speech_start_ms: int = 100
     microphone_target: str = ""
 
 
@@ -50,10 +50,12 @@ class VoiceConfig:
 class LLMConfig:
     model: str = "gemini-3.5-flash-lite"
     system_prompt: str = (
-        "You are Nixi, a concise and friendly desktop voice assistant. "
-        "Answer naturally for speech and avoid Markdown unless asked."
+        "You are Nixi, a highly concise and direct desktop voice assistant. "
+        "Answer questions directly in 1 or 2 sentences maximum. "
+        "Never use conversational filler, preamble, postamble, or verbose explanations. "
+        "Avoid Markdown."
     )
-    max_tokens: int = 1024
+    max_tokens: int = 150
     thinking_level: str = "minimal"
     timeout_seconds: float = 30.0
     history_turns: int = 3

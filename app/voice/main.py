@@ -45,6 +45,7 @@ class NixiVoiceDaemon:
         self.trigger_event = threading.Event()
         self.manual_recording = False
         self.manual_frames: list[np.ndarray] = []
+        self.manual_recording_start = 0.0
         self.popup_close_timer: threading.Timer | None = None
         self.followup_stop_event: threading.Event | None = None
         self._start_trigger_server()
@@ -85,6 +86,11 @@ class NixiVoiceDaemon:
                     self._handle_manual_trigger()
                 
                 if self.manual_recording:
+                    if time.monotonic() - self.manual_recording_start >= 45.0:
+                        print("Max recording duration reached (45s). Automatically stopping...", flush=True)
+                        self._handle_manual_trigger()  # Emulate user toggle stop
+                        continue
+                    
                     try:
                         frame = self.recorder.frame_queue.get(timeout=0.1)
                         if frame is not None:
@@ -109,6 +115,7 @@ class NixiVoiceDaemon:
             self.speaker.stop()
             self.recorder.discard_pending()
             self.manual_recording = True
+            self.manual_recording_start = time.monotonic()
             self.manual_frames = []
             self.popup.open()
             print("Recording started...", flush=True)
@@ -143,6 +150,40 @@ class NixiVoiceDaemon:
         self.popup_close_timer.daemon = True
         self.popup_close_timer.start()
 
+    def _check_exit_command(self, command: str) -> bool:
+        normalized = voice_recognition.normalize_transcript(command)
+        exit_phrases = {
+            "shut up",
+            "you may close now",
+            "you can leave now",
+            "you may leave now",
+            "close now",
+            "stop listening",
+            "exit nixi",
+            "quit",
+            "exit",
+            "stop",
+            "close",
+            "bye bye",
+            "bye",
+            "goodbye",
+        }
+        if any(phrase in normalized for phrase in exit_phrases):
+            print("Exit command detected. Returning to idle state...", flush=True)
+            self.popup.close()
+            # Cancel any pending popup closes and reset the states
+            if self.popup_close_timer is not None:
+                self.popup_close_timer.cancel()
+                self.popup_close_timer = None
+            if self.followup_stop_event is not None:
+                self.followup_stop_event.set()
+                self.followup_stop_event = None
+            self.speaker.stop()
+            self.recorder.discard_pending()
+            self.segmenter.reset()
+            return True
+        return False
+
     def _process_manual_utterance(self, utterance: np.ndarray) -> None:
         request_id = uuid.uuid4().hex[:12]
         try:
@@ -161,15 +202,17 @@ class NixiVoiceDaemon:
             return
 
         print(f"Heard: {command}", flush=True)
-        self._execute_command_turn(command, request_id)
+        if self._check_exit_command(command):
+            return
 
-    def _execute_command_turn(self, command: str, request_id: str) -> None:
         response_text = self._request_response(command, request_id)
         if response_text is None:
             self._schedule_popup_close()
             return
 
-        self._speak_and_listen_live(response_text, request_id)
+        print(f"Speaking response: {response_text}", flush=True)
+        self.speaker.speak(response_text, request_id=request_id)
+        self._schedule_popup_close()
 
     def _request_response(self, command: str, request_id: str) -> str | None:
         server_started = time.perf_counter()
@@ -186,135 +229,6 @@ class NixiVoiceDaemon:
                 error=str(error),
             )
             return None
-
-    def _speak_and_listen_live(self, response_text: str, parent_request_id: str) -> None:
-        request_id = uuid.uuid4().hex[:12]
-        self.followup_stop_event = threading.Event()
-        stop_event = self.followup_stop_event
-        
-        tts_finished = threading.Event()
-        interrupted_tts = threading.Event()
-        
-        self.recorder.discard_pending()
-        self.segmenter.reset()
-
-        def play_tts() -> None:
-            try:
-                self.speaker.speak(response_text, request_id=parent_request_id)
-            finally:
-                tts_finished.set()
-        
-        tts_thread = threading.Thread(target=play_tts, name="nixi-tts", daemon=True)
-        tts_thread.start()
-
-        def handle_speech_start() -> None:
-            if not tts_finished.is_set():
-                print("Barge-in speech start detected. Interrupting TTS...", flush=True)
-                interrupted_tts.set()
-                self.speaker.stop()
-
-        deadline = time.monotonic() + 45.0
-        
-        def frame_gen() -> Iterator[np.ndarray]:
-            post_tts_deadline = None
-            while not stop_event.is_set() and time.monotonic() < deadline and self.running:
-                if tts_finished.is_set() and post_tts_deadline is None:
-                    post_tts_deadline = time.monotonic() + 10.0
-                
-                if post_tts_deadline is not None and time.monotonic() >= post_tts_deadline:
-                    break
-                
-                try:
-                    frame = self.recorder.frame_queue.get(timeout=0.1)
-                    if frame is not None:
-                        yield frame
-                except queue.Empty:
-                    continue
-
-        try:
-            print("Speaking and listening for interruption/follow-up...", flush=True)
-            command = self.sarvam_transcriber.transcribe_live(
-                frame_gen(),
-                request_id,
-                stop_event=stop_event,
-                on_speech_start=handle_speech_start,
-                timeout_seconds=45.0,
-            )
-        except Exception as error:
-            print(f"Live interaction finished/timed out: {error}", flush=True)
-            self.followup_stop_event = None
-            self._schedule_popup_close()
-            return
-
-        self.followup_stop_event = None
-        command = command.strip()
-        
-        if not command:
-            print("No speech detected.", flush=True)
-            self._schedule_popup_close()
-            return
-
-        if interrupted_tts.is_set() and voice_recognition.resembles_spoken_text(command, response_text):
-            print("Ignored speaker echo; listening for your command...", flush=True)
-            self._run_auto_followup(parent_request_id)
-            return
-
-        print(f"Heard follow-up/interrupt: {command}", flush=True)
-        self._execute_command_turn(command, request_id)
-
-    def _run_auto_followup(self, parent_request_id: str) -> None:
-        request_id = uuid.uuid4().hex[:12]
-        self.followup_stop_event = threading.Event()
-        stop_event = self.followup_stop_event
-        deadline = time.monotonic() + 10.0
-        
-        # Discard frames from the queue before beginning the follow-up capture
-        self.recorder.discard_pending()
-        self.segmenter.reset()
-
-        def frame_gen() -> Iterator[np.ndarray]:
-            while not stop_event.is_set() and time.monotonic() < deadline and self.running:
-                try:
-                    frame = self.recorder.frame_queue.get(timeout=0.1)
-                    if frame is None:
-                        break
-                    yield frame
-                except queue.Empty:
-                    continue
-
-        try:
-            print("AI finished speaking. Listening automatically for follow-up...", flush=True)
-            command = self.sarvam_transcriber.transcribe_live(
-                frame_gen(),
-                request_id,
-                stop_event=stop_event,
-                timeout_seconds=10.0,
-            )
-        except Exception as error:
-            print(f"Sarvam live follow-up finished/timed out: {error}", flush=True)
-            self.followup_stop_event = None
-            self._schedule_popup_close()
-            return
-
-        self.followup_stop_event = None
-        command = command.strip()
-        if not command:
-            print("No follow-up speech detected.", flush=True)
-            self._schedule_popup_close()
-            return
-
-        print(f"Heard follow-up: {command}", flush=True)
-        response_text = self._request_response(command, request_id)
-        if response_text is None:
-            self._schedule_popup_close()
-            return
-
-        print(f"Speaking response: {response_text}", flush=True)
-        completed = self.speaker.speak(response_text, request_id=request_id)
-        if completed:
-            self._run_auto_followup(request_id)
-        else:
-            self._schedule_popup_close()
 
     def stop(self) -> None:
         self.running = False

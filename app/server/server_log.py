@@ -81,6 +81,8 @@ class ServerConsole:
         duration_ms: int,
         error: bool = False,
         grounded: bool = False,
+        session_id: str = "",
+        agentic_steps: list[dict[str, str]] | None = None,
     ) -> None:
         color = "red" if error else "green"
         status = "FAILED" if error else "COMPLETED"
@@ -93,6 +95,8 @@ class ServerConsole:
         )
         table.add_column("Field", style="bright_black", no_wrap=True, width=10)
         table.add_column("Value", overflow="fold")
+        if session_id:
+            table.add_row("Session", Text(session_id, style="yellow"))
         table.add_row("Model", Text(model, style="magenta"))
         table.add_row(
             "Grounding",
@@ -101,6 +105,27 @@ class ServerConsole:
         table.add_row("Status", Text(status, style=f"bold {color}"))
         table.add_row("Duration", Text(f"{duration_ms} ms", style="cyan"))
         table.add_row("Prompt", Text(prompt, style="white"))
+
+        if agentic_steps:
+            steps_table = Table(
+                border_style="bright_black",
+                show_header=False,
+                pad_edge=False,
+                show_edge=True,
+            )
+            steps_table.add_column("Step", style="bright_black", no_wrap=True, width=7)
+            steps_table.add_column("Detail", overflow="fold")
+            for i, step in enumerate(agentic_steps, 1):
+                cmd = step.get("command", "")
+                output = step.get("output", "")
+                steps_table.add_row(
+                    Text(f"Step {i}", style="cyan"),
+                    Text(f"$ {cmd}", style="cyan"),
+                )
+                if output:
+                    steps_table.add_row("", Text(f"→ {output}", style="bright_black"))
+            table.add_row("Steps", steps_table)
+
         table.add_row("Error" if error else "Response", Text(response, style=color if error else "white"))
         self.console.print(table)
 

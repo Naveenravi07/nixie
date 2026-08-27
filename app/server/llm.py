@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -17,6 +18,7 @@ from tenacity import (
 )
 
 from app.config import ActionConfig, LLMConfig
+from app.server.safety import CommandBlocked, validate_command
 from app.server.web_search import WebSearcher
 
 
@@ -128,6 +130,7 @@ class VertexChat:
         user_message: str,
         actions: dict[str, ActionConfig],
         request_id: str = "standalone",
+        agentic_steps: list[dict[str, str]] | None = None,
     ) -> tuple[str, ToolCall | None]:
         """
         Send user_message to the LLM with action function declarations.
@@ -135,7 +138,11 @@ class VertexChat:
 
         If the LLM decides an action is needed it returns a ToolCall.
         The spoken_response is always a natural language string suitable for TTS.
+
+        For run_command tool calls, the command is executed and the output is
+        fed back to the LLM in an agentic loop (up to MAX_AGENTIC_STEPS).
         """
+        MAX_AGENTIC_STEPS = 5
         tools = _build_function_declarations(actions)
         # Current-information questions get a live DDGS search. Function calls
         # and paid Google Search grounding cannot coexist, so the raw results
@@ -148,17 +155,82 @@ class VertexChat:
                 content = f"{user_message}\n\n{search_context}"
             request_messages = [*self.messages, {"role": "user", "content": content}]
 
-            response = self._complete(
-                request_messages,
-                use_google_search=False,   # tool calls and search grounding cannot coexist
-                tools=tools if tools else None,
-            )
+            # --- Agentic loop: LLM calls run_command, we execute, feed output back ---
+            for step in range(MAX_AGENTIC_STEPS):
+                response = self._complete(
+                    request_messages,
+                    use_google_search=False,
+                    tools=tools if tools else None,
+                )
 
-            # Check if the LLM returned a function call
-            tool_call = _extract_tool_call(response)
+                tool_call = _extract_tool_call(response)
+                if tool_call is None:
+                    # LLM returned a text response — we're done
+                    spoken = self._response_text(response)
+                    if not spoken:
+                        raise RuntimeError("Gemini returned an empty response.")
+                    self.messages.extend([
+                        {"role": "user", "content": user_message},
+                        {"role": "model", "content": spoken},
+                    ])
+                    self._trim_history()
+                    return spoken, None
 
-            if tool_call is not None:
-                # LLM wants to run an action — build a short spoken confirmation
+                # --- run_command: execute and loop ---
+                if tool_call.name == "run_command":
+                    command = tool_call.args.get("command", "")
+                    try:
+                        validated = validate_command(command)
+                        completed = subprocess.run(
+                            validated,
+                            shell=True,
+                            check=False,
+                            text=True,
+                            capture_output=True,
+                            timeout=15,
+                        )
+                        output = completed.stdout.strip()
+                        if completed.returncode != 0 and completed.stderr.strip():
+                            output = f"{output}\nSTDERR: {completed.stderr.strip()}".strip()
+                        if not output:
+                            output = "(command produced no output)"
+                        # Truncate very long output to avoid context overflow
+                        if len(output) > 3000:
+                            output = output[:3000] + "\n... (truncated)"
+                    except CommandBlocked as error:
+                        output = f"BLOCKED: {error.reason}"
+                    except subprocess.TimeoutExpired:
+                        output = "BLOCKED: command timed out after 15 seconds"
+                    except Exception as error:
+                        output = f"ERROR: {type(error).__name__}: {error}"
+
+                    # Record the agentic step for logging
+                    if agentic_steps is not None:
+                        agentic_steps.append({"command": command, "output": output})
+
+                    # Feed the function result back to the LLM.
+                    # Reuse the original function call part to preserve thought_signature.
+                    tool_result_part = self._types.Part.from_function_response(
+                        name="run_command",
+                        response={"output": output},
+                    )
+                    fc_part = _extract_function_call_part(response)
+                    if fc_part is not None:
+                        request_messages.append(
+                            self._types.Content(
+                                role="model",
+                                parts=[fc_part],
+                            )
+                        )
+                    request_messages.append(
+                        self._types.Content(
+                            role="user",
+                            parts=[tool_result_part],
+                        )
+                    )
+                    continue
+
+                # --- Pre-configured action: execute and return ---
                 action = actions.get(tool_call.name)
                 spoken = f"Sure, running {tool_call.name.replace('_', ' ')}."
                 if action and action.description:
@@ -167,17 +239,17 @@ class VertexChat:
                     {"role": "user", "content": user_message},
                     {"role": "model", "content": spoken},
                 ])
-            else:
-                spoken = self._response_text(response)
-                if not spoken:
-                    raise RuntimeError("Gemini returned an empty response.")
-                self.messages.extend([
-                    {"role": "user", "content": user_message},
-                    {"role": "model", "content": spoken},
-                ])
+                self._trim_history()
+                return spoken, tool_call
 
+            # Max agentic steps reached — return whatever the LLM last said
+            spoken = self._response_text(response) if response else "Done."
+            self.messages.extend([
+                {"role": "user", "content": user_message},
+                {"role": "model", "content": spoken},
+            ])
             self._trim_history()
-            return spoken, tool_call
+            return spoken, None
 
     def should_use_google_search(self, user_message: str) -> bool:
         """Detect prompts that need fresh world information.
@@ -273,15 +345,21 @@ class VertexChat:
         messages: list[dict[str, str]],
         config_options: dict[str, Any],
     ) -> Any:
-        return self._client.models.generate_content(
-            model=self.config.model,
-            contents=[
+        contents: list[Any] = []
+        for message in messages:
+            # Already a Content object (from agentic loop function calls) — pass through
+            if hasattr(message, "role") and hasattr(message, "parts"):
+                contents.append(message)
+                continue
+            contents.append(
                 self._types.Content(
                     role=message["role"],
                     parts=[self._types.Part.from_text(text=message["content"])],
                 )
-                for message in messages
-            ],
+            )
+        return self._client.models.generate_content(
+            model=self.config.model,
+            contents=contents,
             config=self._types.GenerateContentConfig(**config_options),
         )
 
@@ -351,8 +429,35 @@ def _build_function_declarations(actions: dict[str, ActionConfig]) -> list[dict[
     Inspects the command template for {path} and {amount} placeholders
     and exposes them as typed parameters so the LLM can extract them
     from the user's natural language message.
+
+    Always includes a `run_command` tool for arbitrary read-only shell commands.
     """
-    declarations = []
+    declarations: list[dict[str, Any]] = []
+
+    # --- Built-in: run_command (agentic shell execution) ---
+    declarations.append({
+        "name": "run_command",
+        "description": (
+            "Run a read-only shell command on the user's computer and return its output. "
+            "Use this to answer questions about system state, check configurations, "
+            "open applications, open URLs, or gather information. "
+            "Examples: 'free -h' (memory), 'df -h' (disk), 'open https://twitter.com' (browser), "
+            "'firefox' (open app), 'ls ~/Documents' (list files), 'top -bn1 | head -20' (processes). "
+            "Destructive commands (rm, chmod, sudo, etc.) are blocked by the safety layer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute.",
+                },
+            },
+            "required": ["command"],
+        },
+    })
+
+    # --- User-configured actions ---
     for name, action in actions.items():
         if not action.command:
             continue
@@ -409,6 +514,24 @@ def _extract_tool_call(response: Any) -> ToolCall | None:
                     args = dict(getattr(fc, "args", {}) or {})
                     if name:
                         return ToolCall(name=name, args=args)
+    except Exception:
+        pass
+    return None
+
+
+def _extract_function_call_part(response: Any) -> Any | None:
+    """
+    Extract the raw function call Part from a Gemini response.
+    Preserves thought_signature and other metadata needed for multi-turn tool use.
+    """
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                if getattr(part, "function_call", None) is not None:
+                    return part
     except Exception:
         pass
     return None

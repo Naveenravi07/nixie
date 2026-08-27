@@ -166,7 +166,8 @@ class VertexChatTests(unittest.TestCase):
         self.assertIn("Today's date:", parts_text)
         self.assertIn("Kerala Chief Minister latest", parts_text)
         self.assertIn("https://example.com/kerala", parts_text)
-        self.assertIsNone(request["config"].tools)
+        # run_command tool is always present even with no user actions
+        self.assertIsNotNone(request["config"].tools)
         self.assertIsNone(tool_call)
         self.assertIn("Chief Minister", spoken)
 

@@ -92,12 +92,14 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
         # activated search on an earlier turn.
         grounded = chat._search_active or chat.should_use_google_search(message)
         started = time.perf_counter()
+        agentic_steps: list[dict[str, str]] = []
 
         try:
             spoken, tool_call = chat.reply_with_tools(
                 message,
                 self.server.config.actions,
                 request_id=request_id,
+                agentic_steps=agentic_steps,
             )
         except RuntimeError as error:
             self.server.console.llm_call(
@@ -108,6 +110,7 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
                 response=str(error),
                 error=True,
                 grounded=False,
+                session_id=session_id or "",
             )
             self._send_error(HTTPStatus.BAD_GATEWAY, str(error))
             return
@@ -129,6 +132,8 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 response=f"[tool: {tool_call.name}] {spoken}",
                 grounded=False,
+                session_id=session_id or "",
+                agentic_steps=agentic_steps or None,
             )
             self._send_json({
                 "request_id": request_id,
@@ -146,6 +151,8 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
             duration_ms=round((time.perf_counter() - started) * 1000),
             response=spoken,
             grounded=grounded,
+            session_id=session_id or "",
+            agentic_steps=agentic_steps or None,
         )
         self._send_json({
             "request_id": request_id,

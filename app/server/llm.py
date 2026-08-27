@@ -6,7 +6,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 from tenacity import (
@@ -17,6 +17,7 @@ from tenacity import (
 )
 
 from app.config import ActionConfig, LLMConfig
+from app.server.web_search import WebSearcher
 
 
 @dataclass
@@ -34,7 +35,12 @@ _CURRENT_INFORMATION_PATTERN = re.compile(
     r"holiday|school closure|college closure|district collector|alert|warning|"
     r"price|stock|share price|market|crypto|bitcoin|exchange rate|"
     r"election|poll results?|current president|current prime minister|current ceo|"
-    r"who is|what is the status|when is|where is|"
+    r"who (?:is|was|are|leaked|hacked|breached|stole|claimed)|"
+    r"what (?:happened|is going on)|"
+    r"what is the status|when is|where is|"
+    r"what(?:'s| is) (?:the )?(?:date|time|day)|date today|current time|what time|"
+    r"leaked|hacked|breach|"
+    r"chief minister|prime minister|president|governor|"
     r"search(?: the)? web|search online|search it|web search|browse(?: the)? web|"
     r"look it up|look up online|find online"
     r")\b",
@@ -51,7 +57,11 @@ def _is_rate_limit_error(exception: BaseException) -> bool:
 
 
 class VertexChat:
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        searcher: WebSearcher | None = None,
+    ) -> None:
         api_key = os.environ.get("GOOGLE_CLOUD_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError(
@@ -83,6 +93,8 @@ class VertexChat:
             client_options.update(project=project, location=location)
         self._client = genai.Client(**client_options)
         self.config = config
+        self._searcher = searcher
+        self._search_active = False
         self.messages: list[dict[str, str]] = []
         self.lock = threading.Lock()
         print(
@@ -124,9 +136,17 @@ class VertexChat:
         If the LLM decides an action is needed it returns a ToolCall.
         The spoken_response is always a natural language string suitable for TTS.
         """
+        tools = _build_function_declarations(actions)
+        # Current-information questions get a live DDGS search. Function calls
+        # and paid Google Search grounding cannot coexist, so the raw results
+        # are injected as context instead and the model answers from them.
+        search_context = self._search_context(user_message)
+
         with self.lock:
-            tools = _build_function_declarations(actions)
-            request_messages = [*self.messages, {"role": "user", "content": user_message}]
+            content = user_message
+            if search_context:
+                content = f"{user_message}\n\n{search_context}"
+            request_messages = [*self.messages, {"role": "user", "content": content}]
 
             response = self._complete(
                 request_messages,
@@ -143,7 +163,6 @@ class VertexChat:
                 spoken = f"Sure, running {tool_call.name.replace('_', ' ')}."
                 if action and action.description:
                     spoken = action.description.split(".")[0] + "."
-                # Add both turns to history so context is preserved
                 self.messages.extend([
                     {"role": "user", "content": user_message},
                     {"role": "model", "content": spoken},
@@ -161,13 +180,87 @@ class VertexChat:
             return spoken, tool_call
 
     def should_use_google_search(self, user_message: str) -> bool:
-        """Use paid grounding only for prompts that need fresh world information."""
+        """Detect prompts that need fresh world information.
+
+        Drives both paid Vertex grounding (reply path) and the no-key live
+        web-search context (reply_with_tools path). Only runs when enabled.
+        """
         if not self.config.google_search_enabled or not user_message:
             return False
         if _CURRENT_INFORMATION_PATTERN.search(user_message):
             return True
         recent_year = date.today().year - 1
         return any(int(year) >= recent_year for year in _YEAR_PATTERN.findall(user_message))
+
+    def _search_context(self, user_message: str) -> str:
+        """Run a live no-key web search and format a grounded context block."""
+        if not self.config.google_search_enabled or not user_message:
+            return ""
+        if not self._search_active and not self.should_use_google_search(user_message):
+            return ""
+        self._search_active = True
+        # If the user is asking to search (e.g. "search online", "look it up"),
+        # use the last real question from history as the search query instead.
+        query = self._resolve_search_query(user_message)
+        now = datetime.now(timezone.utc)
+        date_line = now.strftime("Today's date: %A, %B %d, %Y. Current time: %H:%M UTC.")
+        try:
+            searcher = self._searcher or WebSearcher()
+            results = searcher.search(query)
+        except Exception as error:
+            print(f"web search skipped: {type(error).__name__}", flush=True)
+            return f"{date_line}\n"
+        if not results:
+            return f"{date_line}\n"
+        lines = [
+            "CRITICAL: The following web search results are the source of truth. "
+            "Answer the user's question ONLY using these results, not your training data.",
+            date_line,
+            "",
+        ]
+        for index, result in enumerate(results, 1):
+            lines.append(f"{index}. {result.title}")
+            lines.append(f"   Source: {result.url}")
+            lines.append(f"   {result.snippet}")
+            lines.append("")
+        return "\n".join(lines)
+
+    _SEARCH_REQUEST_PATTERN = re.compile(
+        r"\bsearch(?:\s+(?:online|the\s+web|it))?|look\s+(?:it\s+)?up|browse(?:\s+the)?\s+web\b",
+        re.IGNORECASE,
+    )
+
+    def _resolve_search_query(self, user_message: str) -> str:
+        """Build a good DDGS query from the user message and conversation history.
+
+        If the message is a 'search online' request, find the real question.
+        If the query contains pronouns or is too short, enrich it with the
+        last model response for better search results.
+        """
+        if not self._SEARCH_REQUEST_PATTERN.search(user_message):
+            base = user_message
+        else:
+            # User said "search online" — find the real question in history
+            base = user_message
+            for msg in reversed(self.messages):
+                if msg["role"] != "user":
+                    continue
+                candidate = msg["content"]
+                if not self._SEARCH_REQUEST_PATTERN.search(candidate):
+                    base = candidate
+                    break
+
+        # If the query is short or pronoun-heavy, try to enrich it with the
+        # last model response for better DDGS results.
+        pronouns = re.compile(r"\b(he|she|it|they|his|her|its|their|this|that|him|them)\b", re.IGNORECASE)
+        if pronouns.search(base):
+            for msg in reversed(self.messages):
+                if msg["role"] == "model" and msg["content"]:
+                    snippet = msg["content"][:200]
+                    base = f"{base} {snippet}"
+                    break
+
+        return base
 
     @retry(
         retry=retry_if_exception(_is_rate_limit_error),

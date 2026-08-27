@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -20,8 +21,33 @@ class NixiServerClient:
         self.base_url = f"http://{config.host}:{config.port}"
         self.timeout_seconds = timeout_seconds
 
-    def send_message(self, message: str, request_id: str) -> str:
-        payload = json.dumps({"message": message, "request_id": request_id}).encode()
+    def new_session(self) -> str:
+        payload = json.dumps({}).encode()
+        request = Request(
+            f"{self.base_url}/session",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                result = json.load(response)
+        except (HTTPError, URLError) as error:
+            raise ServerRequestError(
+                f"Failed to create session: {error}"
+            ) from error
+        session_id = str(result.get("session_id", "")).strip()
+        if not session_id:
+            raise ServerRequestError("Server returned empty session_id")
+        return session_id
+
+    def send_message(
+        self, message: str, request_id: str, session_id: str | None = None,
+    ) -> str:
+        body: dict[str, Any] = {"message": message, "request_id": request_id}
+        if session_id:
+            body["session_id"] = session_id
+        payload = json.dumps(body).encode()
         request = Request(
             f"{self.base_url}/message",
             data=payload,

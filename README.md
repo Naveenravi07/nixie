@@ -16,8 +16,9 @@ sent to the configured LLM provider.
 - Converts command speech to text.
 - Matches phrases to local actions from `config/nixi.toml`.
 - Falls back to Gemini 3.5 Flash-Lite through Vertex AI Express Mode when no local action matches.
-- Adds Google Search grounding only for time-sensitive questions such as weather,
-  news, closures, prices, and schedules.
+- Runs a live no-key web search for time-sensitive questions such as weather,
+  news, closures, prices, and schedules, and uses the results to answer with
+  up-to-date information.
 - Speaks responses with Sarvam TTS when enabled.
 - Exposes a small local HTTP API for messages and actions.
 
@@ -137,9 +138,10 @@ uv run nixi-popup
 Edit [config/nixi.toml](config/nixi.toml) to configure wake phrases, audio
 thresholds, STT, TTS, model settings, and local actions.
 
-`llm.google_search_enabled` controls Vertex AI Google Search grounding. Keep it
-enabled for current-information questions; ordinary conversation does not invoke
-Search.
+`llm.google_search_enabled` controls web search for current-information questions.
+Keep it enabled (the default); ordinary conversation does not invoke Search.
+Time-sensitive prompts trigger a live DuckDuckGo search whose results are fed to
+the model as grounded context.
 
 Example action:
 

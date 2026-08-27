@@ -52,15 +52,61 @@ class SarvamRealtimeTranscriber:
         )
 
     def transcribe_pcm(self, pcm: np.ndarray, request_id: str) -> str:
-        chunk_samples = self.sample_rate // 10
-        padded = np.concatenate(
-            [pcm, np.zeros(self.sample_rate * 600 // 1000, dtype=np.int16)]
+        if not self.config.enabled:
+            return ""
+
+        import io
+        import wave
+
+        started = time.perf_counter()
+        log_event(
+            "voice",
+            "sarvam_stt.started",
+            request_id,
+            model="saaras:v3",
+            language=self.config.language,
         )
-        frames = (
-            padded[offset : offset + chunk_samples]
-            for offset in range(0, padded.size, chunk_samples)
+
+        # REST API has a 30-second limit. Split long audio into chunks.
+        max_samples = self.sample_rate * 30
+        chunks: list[np.ndarray] = []
+        for offset in range(0, pcm.size, max_samples):
+            chunks.append(pcm[offset : offset + max_samples])
+
+        transcripts: list[str] = []
+        for chunk in chunks:
+            wav_buf = io.BytesIO()
+            with wave.open(wav_buf, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(self.sample_rate)
+                wf.writeframes(chunk.astype(np.int16).tobytes())
+            wav_buf.seek(0)
+
+            try:
+                from sarvamai import SarvamAI
+
+                client = SarvamAI(api_subscription_key=self.api_key)
+                response = client.speech_to_text.transcribe(
+                    file=wav_buf,
+                    model="saaras:v3",
+                    language_code=self.config.language,
+                )
+                text = str(response.transcript or "").strip()
+                if text:
+                    transcripts.append(text)
+            except Exception as error:
+                raise RuntimeError(f"Sarvam STT failed: {error}") from error
+
+        transcript = " ".join(transcripts)
+        log_event(
+            "voice",
+            "sarvam_stt.completed",
+            request_id,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            transcript=transcript,
         )
-        return asyncio.run(self._transcribe(frames, request_id, finite=True))
+        return transcript
 
     async def _transcribe(
         self,
@@ -88,7 +134,7 @@ class SarvamRealtimeTranscriber:
             "model": self.config.model,
             "stream_type": self.config.stream_type,
             "mode": self.config.mode,
-            "endpointing": "vad",
+            "endpointing": "manual",
             "encoding": "linear16",
             "sample_rate": str(self.sample_rate),
             "threshold": str(self.config.threshold),

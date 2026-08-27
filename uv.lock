@@ -659,6 +659,7 @@ dependencies = [
     { name = "google-genai" },
     { name = "numpy" },
     { name = "rich" },
+    { name = "sarvamai" },
     { name = "tenacity" },
 ]
 
@@ -670,6 +671,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=2.16.0" },
     { name = "numpy", specifier = "==2.5.1" },
     { name = "rich", specifier = ">=15.0.0" },
+    { name = "sarvamai", specifier = ">=0.1.31" },
     { name = "tenacity", specifier = ">=9.1.4" },
 ]
 
@@ -926,6 +928,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36", size = 230680, upload-time = "2026-04-12T08:24:00.75Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb", size = 310654, upload-time = "2026-04-12T08:24:02.83Z" },
+]
+
+[[package]]
+name = "sarvamai"
+version = "0.1.31"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/af/2d/a8896a98d89a424b67ccf1ebd41b17a06defc028c52ec81798e0897f2e2f/sarvamai-0.1.31.tar.gz", hash = "sha256:270d4727377539d96b5f45650380c10a554bcce505ae33e43925862afaa4ab9b", size = 192469, upload-time = "2026-08-26T20:27:45.041Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0b/3f/83d04c04e11e85b0440552192f9d2690ae04bc992485a19fda93d53aa20e/sarvamai-0.1.31-py3-none-any.whl", hash = "sha256:be0fc453b9b6ebbc7f45d5997994a556b2d4ab9b3cfe2df06bf1f9a4e7ff5c87", size = 400351, upload-time = "2026-08-26T20:27:43.604Z" },
 ]
 
 [[package]]

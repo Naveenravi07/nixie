@@ -130,7 +130,7 @@ class PipeWireRecorder:
         self.frame_samples = config.sample_rate * frame_ms // 1000
         self.frame_bytes = self.frame_samples * np.dtype(np.int16).itemsize
         self.process: subprocess.Popen[bytes] | None = None
-        self.frame_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=300)
+        self.frame_queue: queue.Queue[np.ndarray | None] = queue.Queue()
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:

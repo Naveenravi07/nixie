@@ -96,7 +96,7 @@ class ServerConsole:
         table.add_row("Model", Text(model, style="magenta"))
         table.add_row(
             "Grounding",
-            Text("Google Search" if grounded else "Off", style="cyan" if grounded else "bright_black"),
+            Text("Web Search" if grounded else "Off", style="cyan" if grounded else "bright_black"),
         )
         table.add_row("Status", Text(status, style=f"bold {color}"))
         table.add_row("Duration", Text(f"{duration_ms} ms", style="cyan"))

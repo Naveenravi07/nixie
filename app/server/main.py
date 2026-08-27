@@ -52,6 +52,10 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
             self._handle_message()
             return
 
+        if self.path == "/session":
+            self._handle_new_session()
+            return
+
         if self.path.startswith("/actions/"):
             action_name = unquote(self.path.removeprefix("/actions/")).strip("/")
             self._handle_action(action_name)
@@ -62,6 +66,11 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:
         # Rich request/response records replace BaseHTTPRequestHandler's line log.
         return
+
+    def _handle_new_session(self) -> None:
+        session_id = uuid.uuid4().hex[:12]
+        self.server.sessions[session_id] = VertexChat(self.server.config.llm)
+        self._send_json({"session_id": session_id})
 
     def _handle_message(self) -> None:
         try:
@@ -76,12 +85,16 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
             return
 
         request_id = str(payload.get("request_id", "")).strip() or self._request_id
+        session_id = str(payload.get("session_id", "")).strip() or None
+        chat = self.server.get_chat(session_id)
         self._is_llm_call = True
-        grounded = self.server.chat.should_use_google_search(message)
+        # Search is active if the heuristic matches OR the session already
+        # activated search on an earlier turn.
+        grounded = chat._search_active or chat.should_use_google_search(message)
         started = time.perf_counter()
 
         try:
-            spoken, tool_call = self.server.chat.reply_with_tools(
+            spoken, tool_call = chat.reply_with_tools(
                 message,
                 self.server.config.actions,
                 request_id=request_id,
@@ -264,7 +277,15 @@ class NixiHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.console = console or ServerConsole()
         self.actions = ActionRegistry(config.actions)
-        self.chat = VertexChat(config.llm)
+        self.sessions: dict[str, VertexChat] = {}
+        self._default_session_id = uuid.uuid4().hex[:12]
+        self.sessions[self._default_session_id] = VertexChat(config.llm)
+
+    def get_chat(self, session_id: str | None = None) -> VertexChat:
+        sid = session_id or self._default_session_id
+        if sid not in self.sessions:
+            self.sessions[sid] = VertexChat(self.config.llm)
+        return self.sessions[sid]
 
 
 def parse_args() -> argparse.Namespace:

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from app.config import LLMConfig, TTSConfig
 from app.server.llm import VertexChat
+from app.server.web_search import SearchResult
 from app.voice.tts import SarvamSpeaker
 
 
@@ -129,6 +130,137 @@ class VertexChatTests(unittest.TestCase):
             chat = VertexChat(LLMConfig())
             with self.assertRaisesRegex(RuntimeError, "quota failure for \\[REDACTED\\]"):
                 chat.reply("Hello")
+
+    def test_reply_with_tools_injects_live_web_search_context_for_current_information(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(
+            text="Pinarayi Vijayan is the Chief Minister of Kerala as of 2026."
+        )
+        searcher = MagicMock()
+        searcher.search.return_value = [
+            SearchResult(
+                title="Kerala Chief Minister latest",
+                url="https://example.com/kerala",
+                snippet="Live snippet naming the current Chief Minister of Kerala.",
+            )
+        ]
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig(), searcher=searcher)
+            spoken, tool_call = chat.reply_with_tools(
+                "Who is the current Chief Minister of Kerala?", {}
+            )
+
+        searcher.search.assert_called_once_with(
+            "Who is the current Chief Minister of Kerala?"
+        )
+        request = client.models.generate_content.call_args.kwargs
+        parts_text = " ".join(
+            part.text for content in request["contents"] for part in content.parts
+        )
+        self.assertIn("CRITICAL", parts_text)
+        self.assertIn("source of truth", parts_text)
+        self.assertIn("Today's date:", parts_text)
+        self.assertIn("Kerala Chief Minister latest", parts_text)
+        self.assertIn("https://example.com/kerala", parts_text)
+        self.assertIsNone(request["config"].tools)
+        self.assertIsNone(tool_call)
+        self.assertIn("Chief Minister", spoken)
+
+    def test_reply_with_tools_skips_search_for_ordinary_commands(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="Sure.")
+        searcher = MagicMock()
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig(), searcher=searcher)
+            chat.reply_with_tools("Switch on the desk light.", {})
+
+        searcher.search.assert_not_called()
+
+    def test_search_active_persists_in_session(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="OK.")
+        searcher = MagicMock()
+        searcher.search.return_value = [
+            SearchResult(title="Result", url="https://x.com", snippet="info.")
+        ]
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig(), searcher=searcher)
+            # First call triggers search
+            chat.reply_with_tools("Who is the CM?", {})
+            self.assertTrue(chat._search_active)
+            searcher.search.assert_called_once()
+
+            # Second call: not a heuristic match, but _search_active is True
+            chat.reply_with_tools("How old is he?", {})
+            self.assertEqual(searcher.search.call_count, 2)
+
+    def test_search_active_resets_per_session(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="OK.")
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig())
+            # No search triggered, _search_active stays False
+            chat.reply_with_tools("Switch on the desk light.", {})
+            self.assertFalse(chat._search_active)
+
+    def test_reply_with_tools_falls_back_gracefully_when_search_fails(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(
+            text="I could not look that up."
+        )
+        searcher = MagicMock()
+        searcher.search.side_effect = RuntimeError("ddgs unavailable")
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig(), searcher=searcher)
+            spoken, tool_call = chat.reply_with_tools("What is the latest news?", {})
+
+        self.assertEqual(spoken, "I could not look that up.")
+        self.assertIsNone(tool_call)
+
+    def test_reply_with_tools_persists_search_context_in_history(self) -> None:
+        client = MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(
+            text="V.D. Satheesan is the Chief Minister."
+        )
+        searcher = MagicMock()
+        searcher.search.return_value = [
+            SearchResult(
+                title="Kerala CM 2026",
+                url="https://example.com/cm",
+                snippet="V.D. Satheesan is the new CM.",
+            )
+        ]
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_CLOUD_API_KEY": "vertex-key"}, clear=True),
+            patch("google.genai.Client", return_value=client),
+        ):
+            chat = VertexChat(LLMConfig(), searcher=searcher)
+            chat.reply_with_tools("Who is the CM of Kerala?", {})
+
+        # History should contain the original user message, not the augmented content
+        self.assertEqual(len(chat.messages), 2)
+        self.assertEqual(chat.messages[0]["content"], "Who is the CM of Kerala?")
 
 
 class SarvamTTSTests(unittest.TestCase):

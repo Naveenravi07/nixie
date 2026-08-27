@@ -18,7 +18,7 @@ import numpy as np
 
 from app.environment import load_environment
 from app.event_log import log_event
-from app.config import load_config
+from app.config import ServerConfig, load_config
 from app.voice import audio as voice_audio
 from app.voice import recognition as voice_recognition
 from app.voice.popup_control import PopupController as VoicePopupController
@@ -43,6 +43,7 @@ class NixiVoiceDaemon:
         self.command_deadline = 0.0
         self.running = True
         self.trigger_event = threading.Event()
+        self.pending_session_id: str | None = None
         self.manual_recording = False
         self.manual_frames: list[np.ndarray] = []
         self.manual_recording_start = 0.0
@@ -65,7 +66,11 @@ class NixiVoiceDaemon:
                             continue
                         with conn:
                             data = conn.recv(1024)
-                            if b"trigger" in data:
+                            text = data.decode("utf-8", errors="replace").strip()
+                            if text.startswith("trigger:"):
+                                self.pending_session_id = text.split(":", 1)[1] or None
+                                self.trigger_event.set()
+                            elif text == "trigger":
                                 self.trigger_event.set()
                 except Exception as e:
                     print(f"Trigger server error: {e}", file=sys.stderr)
@@ -168,20 +173,37 @@ class NixiVoiceDaemon:
             "bye",
             "goodbye",
         }
-        if any(phrase in normalized for phrase in exit_phrases):
-            print("Exit command detected. Returning to idle state...", flush=True)
-            self.popup.close()
-            # Cancel any pending popup closes and reset the states
-            if self.popup_close_timer is not None:
-                self.popup_close_timer.cancel()
-                self.popup_close_timer = None
-            if self.followup_stop_event is not None:
-                self.followup_stop_event.set()
-                self.followup_stop_event = None
-            self.speaker.stop()
-            self.recorder.discard_pending()
-            self.segmenter.reset()
-            return True
+        words = normalized.split()
+        for phrase in exit_phrases:
+            phrase_words = phrase.split()
+            if len(phrase_words) == 1:
+                if words and words[0] == phrase:
+                    print("Exit command detected. Returning to idle state...", flush=True)
+                    self.popup.close()
+                    if self.popup_close_timer is not None:
+                        self.popup_close_timer.cancel()
+                        self.popup_close_timer = None
+                    if self.followup_stop_event is not None:
+                        self.followup_stop_event.set()
+                        self.followup_stop_event = None
+                    self.speaker.stop()
+                    self.recorder.discard_pending()
+                    self.segmenter.reset()
+                    return True
+            else:
+                if phrase in normalized:
+                    print("Exit command detected. Returning to idle state...", flush=True)
+                    self.popup.close()
+                    if self.popup_close_timer is not None:
+                        self.popup_close_timer.cancel()
+                        self.popup_close_timer = None
+                    if self.followup_stop_event is not None:
+                        self.followup_stop_event.set()
+                        self.followup_stop_event = None
+                    self.speaker.stop()
+                    self.recorder.discard_pending()
+                    self.segmenter.reset()
+                    return True
         return False
 
     def _process_manual_utterance(self, utterance: np.ndarray) -> None:
@@ -217,7 +239,9 @@ class NixiVoiceDaemon:
     def _request_response(self, command: str, request_id: str) -> str | None:
         server_started = time.perf_counter()
         try:
-            return self.server_client.send_message(command, request_id)
+            return self.server_client.send_message(
+                command, request_id, session_id=self.pending_session_id,
+            )
         except ServerRequestError as error:
             print(str(error), file=sys.stderr)
             log_event(
@@ -230,7 +254,7 @@ class NixiVoiceDaemon:
             )
             return None
 
-    def stop(self) -> None:
+    def stop(self, *_args: object) -> None:
         self.running = False
         self.recorder.stop()
 
@@ -238,17 +262,26 @@ class NixiVoiceDaemon:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the always-on local Nixi voice daemon.")
     parser.add_argument("--config", type=Path, help="path to nixi.toml")
-    parser.add_argument("--trigger", action="store_true", help="Send a trigger to the running voice daemon")
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("trigger", help="Send a trigger to the running voice daemon")
+    sub.add_parser("new", help="Create a new session and trigger the voice daemon")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.trigger:
+    if args.command in ("trigger", "new"):
+        load_environment()
+        server_client = NixiServerClient(ServerConfig())
+        session_id = None
+        if args.command == "new":
+            session_id = server_client.new_session()
+            print(f"New session: {session_id}", flush=True)
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect(("127.0.0.1", 8768))
-                s.sendall(b"trigger\n")
+                msg = f"trigger:{session_id}" if session_id else "trigger"
+                s.sendall(f"{msg}\n".encode())
             print("Trigger sent successfully.", flush=True)
             return
         except Exception as error:

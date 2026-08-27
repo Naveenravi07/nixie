@@ -7,11 +7,18 @@ import os
 import signal
 import subprocess
 import threading
+import warnings
 from math import pi
 from dataclasses import dataclass
 from pathlib import Path
 
 import gi
+
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="GdkPixbuf.* is deprecated",
+)
 
 try:
     gi.require_foreign("cairo")
@@ -37,6 +44,7 @@ POPUP_HEIGHT = 96
 POPUP_MARGIN_BOTTOM = 24
 POPUP_RADIUS = 16
 REPO_ROOT = Path(__file__).resolve().parents[2]
+AVATAR_GIF = REPO_ROOT / "assets" / "eyesv2.gif"
 AVATAR_SVG = REPO_ROOT / "assets" / "Q19WSHi0PH.svg"
 AVATAR_VIDEO = REPO_ROOT / "assets" / "110371-688648556_medium.mp4"
 
@@ -60,9 +68,47 @@ def get_runtime_info() -> RuntimeInfo:
     return RuntimeInfo(is_wayland=is_wayland, has_layer_shell=has_layer_shell)
 
 
+def rounded_rectangle(
+    context: object,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    radius: float,
+) -> None:
+    context.new_sub_path()
+    context.arc(x + width - radius, y + radius, radius, -pi / 2, 0)
+    context.arc(x + width - radius, y + height - radius, radius, 0, pi / 2)
+    context.arc(x + radius, y + height - radius, radius, pi / 2, pi)
+    context.arc(x + radius, y + radius, radius, pi, 3 * pi / 2)
+    context.close_path()
+
+
+def draw_rounded_pixbuf(
+    context: object,
+    width: int,
+    height: int,
+    pixbuf: GdkPixbuf.Pixbuf,
+) -> None:
+    radius = min(POPUP_RADIUS, width / 2, height / 2)
+    context.save()
+    rounded_rectangle(context, 0.5, 0.5, width - 1, height - 1, radius)
+    context.clip()
+    context.scale(width / pixbuf.get_width(), height / pixbuf.get_height())
+    Gdk.cairo_set_source_pixbuf(context, pixbuf, 0, 0)
+    context.paint()
+    context.restore()
+
+    rounded_rectangle(context, 0.5, 0.5, width - 1, height - 1, radius)
+    context.set_source_rgba(1, 1, 1, 0.22)
+    context.set_line_width(1)
+    context.stroke()
+
+
 class NixiPopup:
     def __init__(self) -> None:
         self.runtime = get_runtime_info()
+        self.gif: AnimatedGif | None = None
         self.video: LoopingVideo | None = None
         self.window = self._build_window()
 
@@ -74,6 +120,8 @@ class NixiPopup:
             self._position_fallback_window()
 
     def close(self) -> None:
+        if self.gif is not None:
+            self.gif.stop()
         if self.video is not None:
             self.video.stop()
         self.window.hide()
@@ -105,6 +153,19 @@ class NixiPopup:
         return window
 
     def _build_content(self) -> Gtk.Widget:
+        return self._build_gif()
+
+    def _build_gif(self) -> Gtk.Widget:
+        if AVATAR_GIF.exists():
+            try:
+                self.gif = AnimatedGif(
+                    AVATAR_GIF,
+                    POPUP_WIDTH,
+                    POPUP_HEIGHT,
+                )
+                return self.gif
+            except (GLib.Error, OSError):
+                self.gif = None
         return self._build_video()
 
     def _build_video(self) -> Gtk.Widget:
@@ -146,6 +207,57 @@ class NixiPopup:
         x = geometry.x + max(0, (geometry.width - POPUP_WIDTH) // 2)
         y = geometry.y + max(0, geometry.height - POPUP_HEIGHT - POPUP_MARGIN_BOTTOM)
         self.window.move(x, y)
+
+
+class AnimatedGif(Gtk.DrawingArea):
+    """Render a looping GIF with rounded corners via GdkPixbuf."""
+
+    MIN_FRAME_DELAY_MS = 20
+    STATIC_FRAME_DELAY_MS = 100
+
+    def __init__(self, path: Path, width: int, height: int) -> None:
+        super().__init__()
+        self.width = width
+        self.height = height
+        self.animation = GdkPixbuf.PixbufAnimation.new_from_file(str(path))
+        self.iterator = self.animation.get_iter(None)
+        self.timeout_id: int | None = None
+        self.stopped = False
+        self.set_size_request(width, height)
+        self.connect("draw", self._on_draw)
+        self._schedule_frame()
+
+    def stop(self) -> None:
+        self.stopped = True
+        if self.timeout_id is not None:
+            GLib.source_remove(self.timeout_id)
+            self.timeout_id = None
+
+    def _schedule_frame(self) -> None:
+        delay = self.iterator.get_delay_time()
+        if delay < 0:
+            delay = self.STATIC_FRAME_DELAY_MS
+        self.timeout_id = GLib.timeout_add(
+            max(delay, self.MIN_FRAME_DELAY_MS),
+            self._advance,
+        )
+
+    def _advance(self) -> bool:
+        if self.stopped:
+            return GLib.SOURCE_REMOVE
+        self.iterator.advance(None)
+        self.queue_draw()
+        self._schedule_frame()
+        return GLib.SOURCE_REMOVE
+
+    def _on_draw(self, _widget: Gtk.Widget, context: object) -> bool:
+        draw_rounded_pixbuf(
+            context,
+            self.width,
+            self.height,
+            self.iterator.get_pixbuf(),
+        )
+        return False
 
 
 class LoopingVideo(Gtk.DrawingArea):
@@ -254,36 +366,8 @@ class LoopingVideo(Gtk.DrawingArea):
     def _on_draw(self, _widget: Gtk.Widget, context: object) -> bool:
         if self.pixbuf is None:
             return False
-
-        radius = min(POPUP_RADIUS, self.width / 2, self.height / 2)
-        self._rounded_rectangle(context, 0.5, 0.5, self.width - 1, self.height - 1, radius)
-        context.save()
-        context.clip()
-        Gdk.cairo_set_source_pixbuf(context, self.pixbuf, 0, 0)
-        context.paint()
-        context.restore()
-
-        self._rounded_rectangle(context, 0.5, 0.5, self.width - 1, self.height - 1, radius)
-        context.set_source_rgba(1, 1, 1, 0.22)
-        context.set_line_width(1)
-        context.stroke()
+        draw_rounded_pixbuf(context, self.width, self.height, self.pixbuf)
         return False
-
-    @staticmethod
-    def _rounded_rectangle(
-        context: object,
-        x: float,
-        y: float,
-        width: float,
-        height: float,
-        radius: float,
-    ) -> None:
-        context.new_sub_path()
-        context.arc(x + width - radius, y + radius, radius, -pi / 2, 0)
-        context.arc(x + width - radius, y + height - radius, radius, 0, pi / 2)
-        context.arc(x + radius, y + height - radius, radius, pi / 2, pi)
-        context.arc(x + radius, y + radius, radius, pi, 3 * pi / 2)
-        context.close_path()
 
 
 def load_css() -> None:
@@ -311,6 +395,8 @@ def main() -> None:
     try:
         Gtk.main()
     finally:
+        if popup.gif is not None:
+            popup.gif.stop()
         if popup.video is not None:
             popup.video.stop()
 

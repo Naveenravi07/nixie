@@ -5,12 +5,14 @@ Run via:  uv run nixi-server --discover
 Pipeline:
   1. Detect WM from environment variables
   2. fastfetch --format json  →  system profile  →  nixi-profile.toml
-  3. Find WM config files (using known paths per WM, confirmed from official docs)
-  4. Feed raw config content to LLM → structured {intent: command} extraction
-  5. Scan ~/.local/bin and known script dirs by filename stem
-  6. Merge: user script > LLM-extracted > silent skip (no fallbacks written)
-  7. Write [actions] block into nixi.toml (user section above marker untouched)
-  8. Write nixi-profile.toml with system info for LLM context
+  3. Run tree on ~ and ~/.config (depth 2-3) for a broad directory view
+  4. Send tree output to LLM → identifies relevant config files, script dirs, wallpaper dirs
+  5. Read discovered config files, feed raw content to LLM → structured {intent: command}
+  6. Scan discovered + known script dirs by filename stem
+  7. Scan discovered + known wallpaper dirs recursively
+  8. Merge: user script > LLM-extracted > silent skip (no fallbacks written)
+  9. Write [actions] block into nixi.toml (user section above marker untouched)
+  10. Write nixi-profile.toml with system info + wallpaper list
 """
 
 from __future__ import annotations
@@ -46,7 +48,8 @@ INTENTS: dict[str, IntentSpec] = {
         ),
         args="{path}",
         filename_hints=["wallpaper", "setwall", "set-wall", "set_wall",
-                        "swww", "feh", "nitrogen", "hyprpaper", "swaybg"],
+                        "wallselect", "wall-sel", "swww", "feh", "nitrogen",
+                        "hyprpaper", "swaybg"],
     ),
     "take_screenshot": IntentSpec(
         description="Takes a screenshot of the current screen.",
@@ -66,8 +69,8 @@ INTENTS: dict[str, IntentSpec] = {
     ),
     "lock_screen": IntentSpec(
         description="Locks the screen.",
-        filename_hints=["lockscreen", "lock-screen", "lock_screen",
-                        "swaylock", "i3lock", "betterlockscreen"],
+        filename_hints=["lockscreen", "lock-screen", "lock_screen", "screenlock",
+                        "locker", "swaylock", "i3lock", "betterlockscreen"],
     ),
     "open_launcher": IntentSpec(
         description="Opens the application launcher.",
@@ -166,6 +169,195 @@ def detect_wm() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Home directory structure scan via tree
+# ---------------------------------------------------------------------------
+
+def tree_home_structure() -> str:
+    """
+    Run `tree` on ~ and ~/.config (both depth 2) to get a broad view of the
+    user's home directory layout. Returns combined tree output.
+    Falls back to `find` output if tree is not installed.
+    """
+    home = Path.home()
+    outputs: list[str] = []
+
+    # Directory names that are pure noise (app caches, browser internals, etc.)
+    # Filtering them keeps the tree small enough for LLM analysis while
+    # preserving meaningful structure (app config dirs, scripts, rices, walls).
+    noise = (
+        "__pycache__|.git|node_modules|.cache|Cache|GPUCache|Code Cache|"
+        "Cached*|Crashpad|DawnGraphiteCache|DawnWebGPUCache|Dictionaries|"
+        "Local Storage|logs|Preferences|Session Storage|Shared Dictionary|"
+        "shared_proto_db|VideoDecodeStats|Cookies*|DIPS*|machineid|"
+        "Trust Tokens*|Opera Vault|blob_storage|app.db|Network|WebStorage|"
+        "History*|Visited Links|Favicons*|Login Data*|BrokerCache|"
+        "manifest|extensions|IndexedDB|Backups|Default|Profile"
+    )
+
+    tree_bin = shutil.which("tree")
+
+    if tree_bin:
+        # HOME: directories only (depth 2) — shows layout (Music, Pictures, Code...)
+        #       without the noise of every downloaded file. Wallpaper/media files
+        #       are found by recursive scanning of the dirs the AI picks.
+        # CONFIG: with files (depth 2) — the AI needs file names to decide which
+        #       config files to read.
+        for depth, label, path, dirs_only in [
+            (2, "HOME", home, True),
+            (2, "HOME/.config", home / ".config", False),
+        ]:
+            if not path.is_dir():
+                continue
+            cmd = [tree_bin, "-L", str(depth), "--dirsfirst", "-I", noise]
+            if dirs_only:
+                cmd.append("-d")
+            cmd.append(str(path))
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    outputs.append(f"=== {label} (depth {depth}) ===\n{result.stdout}")
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+    else:
+        # Fallback: use find to get a basic structure
+        for depth, label, path in [
+            (2, "HOME", home),
+            (2, "HOME/.config", home / ".config"),
+        ]:
+            if not path.is_dir():
+                continue
+            try:
+                result = subprocess.run(
+                    ["find", str(path), "-maxdepth", str(depth), "-type", "d"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0:
+                    outputs.append(f"=== {label} (depth {depth}) ===\n{result.stdout}")
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+    return "\n".join(outputs)
+
+
+# LLM prompt for analyzing directory structure
+_STRUCTURE_ANALYSIS_PROMPT = """\
+You are a Linux desktop environment analyst. The user is running the "{wm}" window manager.
+
+Below is the output of `tree` showing the structure of their home directory and ~/.config.
+
+Your job: Analyze this directory structure to understand the user's whole setup:
+1. **Config files** that likely contain window manager keybindings, shortcuts, or action definitions
+2. **Script directories** that likely contain user scripts (volume, brightness, screenshots, etc.)
+3. **Wallpaper directories** that likely contain wallpaper images
+4. **Media roots** — the top-level directories where the user keeps music, videos and other media
+
+TREE OUTPUT:
+{tree_output}
+
+Return ONLY a valid JSON object with these keys:
+{{
+  "config_files": [
+    "list of absolute paths to config files that likely define keybindings/actions",
+    "expand ~ to the actual home directory path",
+    "include paths like .config/bspwm/bspwmrc, .config/sxhkd/sxhkdrc, .config/hypr/hyprland.conf, etc."
+  ],
+  "script_dirs": [
+    "list of absolute paths to directories that likely contain scripts",
+    "prefer directories with names like scripts, bin, or containing executable files"
+  ],
+  "wallpaper_dirs": [
+    "list of absolute paths to directories that likely contain wallpaper images",
+    "look for dirs named walls, wallpapers, backgrounds, rice/*/walls, or containing .jpg/.png/.webp files",
+    "if you see a rices/ or rice/ directory, include it — wallpapers may be nested inside"
+  ],
+  "media_roots": [
+    "list of absolute top-level home directories for music, videos, pictures, etc.",
+    "e.g. /home/user/Music, /home/user/Videos, /home/user/Pictures"
+  ]
+}}
+
+Rules:
+- Expand ~ to the full home directory path ({home_dir})
+- Be aggressive — if a directory looks like it could contain relevant files, include it
+- For config_files: prefer actual config files over directories. Include files like bspwmrc, sxhkdrc, config.ini, *.conf, *.lua, etc.
+- For script_dirs: look for dirs named scripts, bin, or dirs inside .config/{wm}/ that might have helper scripts
+- For wallpaper_dirs: look for dirs with names like walls, wallpapers, backgrounds, rices/*/walls
+- For media_roots: the obvious top-level dirs from the HOME tree (Music, Videos, Pictures, etc.)
+- Only include paths that actually appear in the tree output (or are obvious siblings of what appears)
+- Return raw JSON only — no markdown fences, no explanation text
+"""
+
+
+def analyze_structure_with_llm(wm: str, tree_output: str) -> dict[str, list[str]]:
+    """
+    Send the tree output to the LLM and ask it to identify relevant config files,
+    script directories, and wallpaper directories.
+    Returns {config_files: [...], script_dirs: [...], wallpaper_dirs: [...]}.
+    Returns empty dict on any failure.
+    """
+    if not tree_output.strip():
+        return {}
+
+    prompt = _STRUCTURE_ANALYSIS_PROMPT.format(
+        wm=wm,
+        tree_output=tree_output[:60_000],  # cap to stay within LLM context
+        home_dir=str(Path.home()),
+    )
+
+    try:
+        api_key = os.environ.get("GOOGLE_CLOUD_API_KEY", "").strip()
+        if not api_key:
+            print("    [warn] GOOGLE_CLOUD_API_KEY not set — skipping structure analysis")
+            return {}
+
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(vertexai=True, api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=[types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=prompt)],
+            )],
+            config=types.GenerateContentConfig(
+                max_output_tokens=2048,
+            ),
+        )
+
+        raw = (response.text or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        result: dict = json.loads(raw)
+
+        # Validate and expand ~ in paths
+        expanded: dict[str, list[str]] = {}
+        for key in ("config_files", "script_dirs", "wallpaper_dirs", "media_roots"):
+            paths = result.get(key, [])
+            if not isinstance(paths, list):
+                continue
+            expanded[key] = []
+            for p in paths:
+                if not isinstance(p, str):
+                    continue
+                # Expand ~ to home dir
+                p = p.replace("~", str(Path.home()))
+                expanded[key].append(p)
+
+        return expanded
+
+    except Exception as e:
+        print(f"    [warn] Structure analysis failed: {e}")
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # System profile via fastfetch
 # ---------------------------------------------------------------------------
 
@@ -236,19 +428,31 @@ def probe_system(wm: str) -> SystemProfile:
 # WM config reading
 # ---------------------------------------------------------------------------
 
-def find_wm_configs(wm: str) -> list[Path]:
-    """Return all existing config files for the detected WM."""
+def find_wm_configs(wm: str, additional_paths: list[Path] | None = None) -> list[Path]:
+    """Return all existing config files for the detected WM.
+    Merges hardcoded candidates with LLM-discovered paths."""
     candidates = WM_CONFIG_CANDIDATES.get(wm, [])
-    return [p for p in candidates if p.exists()]
+    # Add LLM-discovered paths (deduplicated)
+    seen: set[str] = set()
+    result: list[Path] = []
+    for p in list(additional_paths or []) + candidates:
+        resolved = str(p)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if p.exists():
+            result.append(p)
+    return result
 
 
-def read_wm_configs(wm: str) -> dict[str, str]:
+def read_wm_configs(wm: str, additional_paths: list[Path] | None = None) -> dict[str, str]:
     """
     Return {filename: content} for all found WM config files.
+    Merges hardcoded candidates with LLM-discovered paths.
     Content is capped at 12 KB per file to stay within LLM context.
     """
     configs: dict[str, str] = {}
-    for path in find_wm_configs(wm):
+    for path in find_wm_configs(wm, additional_paths):
         try:
             content = path.read_text(errors="ignore")[:12_000]
             configs[str(path)] = content
@@ -265,7 +469,7 @@ _EXTRACTION_PROMPT = """\
 You are a Linux desktop assistant configuration parser and action metadata generator.
 
 The user is running the "{wm}" window manager/compositor.
-Below are the raw contents of their WM configuration file(s).
+Below are the raw contents of their WM configuration file(s) and any discovered user scripts.
 
 IMPORTANT PARSING NOTES FOR {wm}:
 - Commands may be quoted with EITHER single quotes OR double quotes. Parse both.
@@ -312,6 +516,12 @@ Rules:
 - For take_screenshot: prefer the area/region selection variant if both exist
 - For set_wallpaper: ONLY include if it is a dynamic command. Skip static startup wallpaper lines (e.g. hyprpaper preload with a fixed path).
 - For open_launcher: if a variable like `local menu = "hyprlauncher"` is used, resolve it to the actual value.
+- When an intent is handled by a script in the SCRIPTS section:
+  - READ the script's code to get the EXACT flags it supports. The command MUST be `<full script path> <the real flags>` — never invent flags.
+  - E.g. if the script parses `case $1 in --inc|--dec|--toggle)`, the commands are "…/Volume --inc", "…/Volume --dec", "…/Volume --toggle".
+  - If the script steps by a fixed amount (e.g. always +5 or 5%), leave {{amount}} out of the command and explain the fixed step in the description.
+  - If the script accepts a dynamic amount/value, use the {{amount}} or {{path}} placeholder with its exact position.
+  - Use the ABSOLUTE PATH you were given, exactly as written in the SCRIPTS section.
 - Return raw JSON only — no markdown fences, no explanation text whatsoever.
 
 Example output for volume_down:
@@ -325,16 +535,21 @@ Example output for volume_down:
 
 --- CONFIG FILES ---
 {config_content}
+{script_section}
 """
 
 
-def extract_actions_with_llm(wm: str, configs: dict[str, str]) -> dict[str, dict]:
+def extract_actions_with_llm(
+    wm: str,
+    configs: dict[str, str],
+    scripts_content: str = "",
+) -> dict[str, dict]:
     """
-    Send WM config content to the LLM.
+    Send WM config content + discovered script contents to the LLM.
     Returns {intent: {command, description, args}} with rich metadata.
     Returns {} on any failure.
     """
-    if not configs:
+    if not configs and not scripts_content:
         return {}
 
     config_content = "\n\n".join(
@@ -342,7 +557,16 @@ def extract_actions_with_llm(wm: str, configs: dict[str, str]) -> dict[str, dict
         for path, content in configs.items()
     )
 
-    prompt = _EXTRACTION_PROMPT.format(wm=wm, config_content=config_content)
+    if scripts_content:
+        script_section = "\n--- DISCOVERED SCRIPTS (full paths + contents) ---\n" + scripts_content
+    else:
+        script_section = ""
+
+    prompt = _EXTRACTION_PROMPT.format(
+        wm=wm,
+        config_content=config_content,
+        script_section=script_section,
+    )
 
     try:
         api_key = os.environ.get("GOOGLE_CLOUD_API_KEY", "").strip()
@@ -399,15 +623,19 @@ def extract_actions_with_llm(wm: str, configs: dict[str, str]) -> dict[str, dict
 # Script scanning — filename-stem matching only (no body scan)
 # ---------------------------------------------------------------------------
 
-def scan_scripts() -> dict[str, Path]:
+def scan_scripts(additional_dirs: list[Path] | None = None) -> dict[str, Path]:
     """
-    Scan SCAN_DIRS for executable scripts. Match by filename stem to intent hints.
+    Scan directories for executable scripts. Match by filename stem to intent hints.
+    Accepts additional_dirs from LLM structure analysis (checked first).
     Returns {intent: first_matching_script_path}. First directory/match wins.
     """
     found: dict[str, Path] = {}
     remaining = set(INTENTS.keys())
 
-    for directory in SCAN_DIRS:
+    # Merge: LLM-discovered dirs first, then hardcoded fallbacks
+    search_dirs: list[Path] = list(additional_dirs or []) + list(SCAN_DIRS)
+
+    for directory in search_dirs:
         if not directory.is_dir():
             continue
         for script in sorted(directory.iterdir()):
@@ -423,6 +651,46 @@ def scan_scripts() -> dict[str, Path]:
             break
 
     return found
+
+
+def collect_script_contents(
+    script_dirs: list[Path],
+    per_file_budget: int = 8_000,
+    total_budget: int = 60_000,
+) -> str:
+    """
+    Read the contents of executable scripts in the given dirs so the LLM can
+    extract the exact CLI flags instead of guessing from filenames.
+    Smallest scripts are prioritised first — intent-relevant scripts (volume,
+    brightness, screenshots, lock, media) are typically tiny, while big
+    utilities (network managers, full editors) exceed the budget and are dropped.
+    Returns a formatted string: "=== path ===\n<content>" blocks.
+    """
+    files: list[tuple[int, Path]] = []
+    for directory in script_dirs:
+        if not directory.is_dir():
+            continue
+        for script in sorted(directory.iterdir()):
+            if not script.is_file() or not os.access(script, os.X_OK):
+                continue
+            try:
+                files.append((script.stat().st_size, script))
+            except OSError:
+                continue
+
+    sections: list[str] = []
+    total = 0
+    for size, script in sorted(files):
+        if total >= total_budget:
+            break
+        try:
+            content = script.read_text(errors="ignore")[:per_file_budget]
+        except OSError:
+            continue
+        sections.append(f"=== {script} ===\n{content}")
+        total += len(content)
+
+    return "\n\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
@@ -466,14 +734,28 @@ def build_actions(
             ))
         elif intent in llm_map:
             meta = llm_map[intent]
-            actions.append(DiscoveredAction(
-                intent=intent,
-                command=meta["command"],
-                source="wm-config",
-                origin=f"extracted from {wm} config by LLM",
-                description=meta.get("description", "") or spec.description,
-                args=meta.get("args", ""),
-            ))
+            command = meta["command"]
+            # If the LLM mapped this intent to a discovered script (full path),
+            # treat it as a first-class script action rather than a config parse.
+            script_cmd = Path(command)
+            if script_cmd.is_file() and os.access(script_cmd, os.X_OK):
+                actions.append(DiscoveredAction(
+                    intent=intent,
+                    command=command,
+                    source="script",
+                    origin=str(script_cmd),
+                    description=meta.get("description", "") or spec.description,
+                    args=meta.get("args", ""),
+                ))
+            else:
+                actions.append(DiscoveredAction(
+                    intent=intent,
+                    command=command,
+                    source="wm-config",
+                    origin=f"extracted from {wm} config by LLM",
+                    description=meta.get("description", "") or spec.description,
+                    args=meta.get("args", ""),
+                ))
 
     return actions
 
@@ -547,15 +829,20 @@ def _is_screenshot_dir(path: Path) -> bool:
     return any(hint in name for hint in _SCREENSHOT_DIR_HINTS)
 
 
-def scan_wallpapers() -> list[str]:
+def scan_wallpapers(additional_dirs: list[Path] | None = None) -> list[str]:
     """
     Scan known picture directories recursively for image files.
     Excludes any subdirectory whose name suggests it holds screenshots.
+    Accepts additional_dirs from LLM structure analysis.
     Returns a sorted list of absolute path strings.
     """
     found: list[Path] = []
+    seen: set[str] = set()
 
-    for root in _WALLPAPER_SEARCH_ROOTS:
+    # Merge hardcoded roots + LLM-discovered dirs (LLM dirs first for priority)
+    search_roots: list[Path] = list(additional_dirs or []) + list(_WALLPAPER_SEARCH_ROOTS)
+
+    for root in search_roots:
         if not root.is_dir():
             continue
         for f in root.rglob("*"):
@@ -566,6 +853,11 @@ def scan_wallpapers() -> list[str]:
             # Exclude files inside screenshot-named directories at any depth
             if any(_is_screenshot_dir(parent) for parent in f.parents if parent != root.parent):
                 continue
+            # Deduplicate across multiple search roots
+            resolved = str(f)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
             found.append(f)
 
     return sorted(str(f) for f in found)
@@ -575,6 +867,8 @@ def write_profile(
     profile: SystemProfile,
     configs: dict[str, str],
     wallpapers: list[str],
+    wallpaper_dirs: list[str] | None = None,
+    media_roots: list[str] | None = None,
 ) -> None:
     lines = [
         "# Nixi system profile — auto-generated by `nixi-server --discover`",
@@ -598,6 +892,14 @@ def write_profile(
                   "# Config files read during discovery"]
         for path in configs:
             lines.append(f'# {path}')
+
+    # Save machine-discovered paths so the runtime LLM understands the layout
+    discovered_dirs = (wallpaper_dirs or []) + (media_roots or [])
+    if discovered_dirs:
+        lines += ["", "[paths]",
+                  "# Directories discovered during discovery (wallpapers, media roots, etc.)"]
+        for d in discovered_dirs:
+            lines.append(f'# {d}')
 
     if wallpapers:
         lines += [
@@ -639,48 +941,74 @@ def run_discovery(config_path: Path) -> None:
         if val:
             print(f"    {label:<12}: {val}")
 
-    # 3. Read WM config files
+    # 3. Aggressive directory scan via tree + LLM analysis
+    print(f"\n  Scanning home directory structure (tree)...")
+    tree_output = tree_home_structure()
+    if tree_output:
+        tree_lines = tree_output.count("\n")
+        print(f"    Captured {tree_lines} lines of directory structure")
+    else:
+        print("    [warn] tree output empty — falling back to hardcoded paths")
+
+    print(f"\n  Analyzing structure with LLM...")
+    structure = analyze_structure_with_llm(wm, tree_output)
+    if structure:
+        for key, paths in structure.items():
+            if paths:
+                print(f"    {key}: {len(paths)} path(s) discovered")
+    else:
+        print("    Structure analysis failed — using hardcoded fallback paths")
+
+    # 4. Read WM config files (LLM-discovered + hardcoded fallbacks)
+    llm_config_paths = [Path(p) for p in structure.get("config_files", [])]
     print(f"\n  Reading {wm} config files...")
-    configs = read_wm_configs(wm)
+    configs = read_wm_configs(wm, llm_config_paths)
     if configs:
         for path in configs:
             print(f"    {path}")
     else:
         print(f"    No config files found for {wm}")
 
-    # 4. LLM extraction from config
+    # 5. LLM extraction from config + discovered scripts
+    llm_script_dirs = [Path(p) for p in structure.get("script_dirs", [])]
+    scripts_content = collect_script_contents(llm_script_dirs)
+
     llm_map: dict[str, str] = {}
-    if configs:
-        print(f"\n  Extracting actions from config via LLM...")
-        llm_map = extract_actions_with_llm(wm, configs)
+    if configs or scripts_content:
+        print(f"\n  Extracting actions via LLM (config + script contents)...")
+        llm_map = extract_actions_with_llm(wm, configs, scripts_content)
         if llm_map:
             for intent, meta in llm_map.items():
-                cmd_preview = meta.get("command", "")[:65]
+                cmd_preview = meta.get("command", "")[:70]
                 print(f"    {intent:<22} <- {cmd_preview}")
         else:
             print("    Nothing extracted")
 
-    # 5. Script scan
+    # 6. Script scan by filename stem (LLM-discovered dirs + hardcoded fallbacks)
     print(f"\n  Scanning script directories...")
-    script_map = scan_scripts()
-    for directory in SCAN_DIRS:
+    script_map = scan_scripts(llm_script_dirs)
+    all_script_dirs = llm_script_dirs + [d for d in SCAN_DIRS if d not in llm_script_dirs]
+    for directory in all_script_dirs:
         if directory.is_dir():
             print(f"    {directory}  [found]")
     if script_map:
         for intent, path in script_map.items():
             print(f"    {intent:<22} <- {path}")
 
-    # 6. Scan wallpapers
+    # 7. Scan wallpapers (LLM-discovered dirs + hardcoded fallbacks)
+    llm_wallpaper_dirs = [Path(p) for p in structure.get("wallpaper_dirs", [])]
     print(f"\n  Scanning for wallpaper images...")
-    wallpapers = scan_wallpapers()
+    wallpapers = scan_wallpapers(llm_wallpaper_dirs)
     if wallpapers:
-        print(f"    Found {len(wallpapers)} image(s), excluding screenshot directories:")
-        for w in wallpapers:
+        print(f"    Found {len(wallpapers)} image(s):")
+        for w in wallpapers[:20]:  # show first 20
             print(f"    {w}")
+        if len(wallpapers) > 20:
+            print(f"    ... and {len(wallpapers) - 20} more")
     else:
-        print("    No images found in ~/Pictures or ~/Wallpapers")
+        print("    No images found")
 
-    # 7. Build final action list (script > llm > skip)
+    # 8. Build final action list (script > llm > skip)
     actions = build_actions(wm, script_map, llm_map)
 
     print(f"\n  Final actions ({len(actions)}):")
@@ -690,13 +1018,21 @@ def run_discovery(config_path: Path) -> None:
         for a in actions:
             print(f"    {a.intent:<22} [{a.source:<9}]  {a.origin}")
 
-    # 8. Write nixi.toml [actions] block
+    # 9. Write nixi.toml [actions] block
     write_actions_to_config(config_path, actions)
     print(f"\n  Actions written  : {config_path}")
 
-    # 9. Write nixi-profile.toml (includes wallpaper file list)
+    # 10. Write nixi-profile.toml (includes wallpaper file list + discovered path context)
+    llm_media_roots = structure.get("media_roots", [])
     profile_path = config_path.parent / "nixi-profile.toml"
-    write_profile(profile_path, profile, configs, wallpapers)
+    write_profile(
+        profile_path,
+        profile,
+        configs,
+        wallpapers,
+        wallpaper_dirs=structure.get("wallpaper_dirs", []),
+        media_roots=llm_media_roots,
+    )
     print(f"  Profile written  : {profile_path}")
 
     print("\nDone. Restart nixi-server to load the new config.\n")

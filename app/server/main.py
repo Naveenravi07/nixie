@@ -317,8 +317,8 @@ def main() -> None:
 
     if args.discover:
         from .discovery import run_discovery
-        from app.config import DEFAULT_CONFIG_PATH
-        config_path = args.config or DEFAULT_CONFIG_PATH
+        from app.config import resolve_config_path
+        config_path = resolve_config_path(args.config)
         run_discovery(config_path)
         return
 

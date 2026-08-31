@@ -1,0 +1,41 @@
+agent_name = "Nixi"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[voice]
+sample_rate = 16000
+command_timeout_seconds = 8
+# Set this to a PipeWire node id or name to override the default microphone.
+microphone_target = ""
+
+[llm]
+model = "gemini-3.5-flash-lite"
+max_tokens = 1024
+thinking_level = "minimal"
+timeout_seconds = 30
+history_turns = 8
+# Allow Vertex AI to ground time-sensitive questions with Google Search.
+google_search_enabled = true
+
+[stt]
+enabled = true
+model = "saaras:v3-realtime"
+language = "en-IN"
+mode = "transcribe"
+stream_type = "fast"
+threshold = 0.3
+silence_ms = 500
+min_speech_ms = 250
+timeout_seconds = 15
+
+[tts]
+enabled = true
+model = "bulbul:v3"
+language = "en-IN"
+speaker = "shubh"
+pace = 1.05
+sample_rate = 24000
+temperature = 0.6
+timeout_seconds = 30

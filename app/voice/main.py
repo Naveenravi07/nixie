@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Always-on PipeWire microphone listener with local Whisper transcription."""
+"""PipeWire microphone listener with Sarvam transcription."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
@@ -30,7 +29,6 @@ class NixiVoiceDaemon:
     def __init__(self, config_path: Path | None = None) -> None:
         self.config = load_config(config_path)
         self.voice = self.config.voice
-        self.segmenter = voice_audio.UtteranceSegmenter(self.voice)
         self.recorder = voice_audio.PipeWireRecorder(self.voice)
         self.popup = VoicePopupController()
         self.sarvam_transcriber = SarvamRealtimeTranscriber(
@@ -188,7 +186,6 @@ class NixiVoiceDaemon:
                         self.followup_stop_event = None
                     self.speaker.stop()
                     self.recorder.discard_pending()
-                    self.segmenter.reset()
                     return True
             else:
                 if phrase in normalized:
@@ -202,7 +199,6 @@ class NixiVoiceDaemon:
                         self.followup_stop_event = None
                     self.speaker.stop()
                     self.recorder.discard_pending()
-                    self.segmenter.reset()
                     return True
         return False
 

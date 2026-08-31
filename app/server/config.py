@@ -21,28 +21,8 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class VoiceConfig:
-    wake_phrases: tuple[str, ...] = (
-        "hey nixi",
-        "hey nixie",
-        "hey nicki",
-        "hey nicky",
-        "hey nick see",
-        "hey next see",
-        "hey next thing",
-    )
-    model: str = "tiny.en"
-    language: str = "en"
     sample_rate: int = 16_000
-    speech_threshold: int = 500
-    silence_ms: int = 700
-    speech_start_ms: int = 150
-    min_speech_ms: int = 250
-    max_utterance_seconds: float = 8.0
     command_timeout_seconds: float = 8.0
-    calibration_ms: int = 1_000
-    adaptive_noise_ratio: float = 2.5
-    barge_in_threshold_multiplier: float = 1.2
-    barge_in_speech_start_ms: int = 100
     microphone_target: str = ""
 
 
@@ -119,36 +99,9 @@ def load_config(path: Path | None = None) -> NixiConfig:
 
     voice_data = data.get("voice", {})
     voice = VoiceConfig(
-        wake_phrases=tuple(
-            str(phrase).strip().lower()
-            for phrase in voice_data.get("wake_phrases", VoiceConfig.wake_phrases)
-            if str(phrase).strip()
-        ),
-        model=str(voice_data.get("model", VoiceConfig.model)),
-        language=str(voice_data.get("language", VoiceConfig.language)),
         sample_rate=int(voice_data.get("sample_rate", VoiceConfig.sample_rate)),
-        speech_threshold=int(voice_data.get("speech_threshold", VoiceConfig.speech_threshold)),
-        silence_ms=int(voice_data.get("silence_ms", VoiceConfig.silence_ms)),
-        speech_start_ms=int(voice_data.get("speech_start_ms", VoiceConfig.speech_start_ms)),
-        min_speech_ms=int(voice_data.get("min_speech_ms", VoiceConfig.min_speech_ms)),
-        max_utterance_seconds=float(
-            voice_data.get("max_utterance_seconds", VoiceConfig.max_utterance_seconds)
-        ),
         command_timeout_seconds=float(
             voice_data.get("command_timeout_seconds", VoiceConfig.command_timeout_seconds)
-        ),
-        calibration_ms=int(voice_data.get("calibration_ms", VoiceConfig.calibration_ms)),
-        adaptive_noise_ratio=float(
-            voice_data.get("adaptive_noise_ratio", VoiceConfig.adaptive_noise_ratio)
-        ),
-        barge_in_threshold_multiplier=float(
-            voice_data.get(
-                "barge_in_threshold_multiplier",
-                VoiceConfig.barge_in_threshold_multiplier,
-            )
-        ),
-        barge_in_speech_start_ms=int(
-            voice_data.get("barge_in_speech_start_ms", VoiceConfig.barge_in_speech_start_ms)
         ),
         microphone_target=str(
             voice_data.get("microphone_target", VoiceConfig.microphone_target)

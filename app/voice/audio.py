@@ -1,11 +1,10 @@
-"""Audio segmentation and continuous PipeWire capture for Nixi voice."""
+"""Continuous PipeWire capture for Nixi voice."""
 
 from __future__ import annotations
 
 import queue
 import subprocess
 import threading
-from collections import deque
 from collections.abc import Iterator
 
 import numpy as np
@@ -14,111 +13,6 @@ from app.config import VoiceConfig
 
 
 FRAME_MS = 50
-
-
-class UtteranceSegmenter:
-    """Split PCM frames into utterances using an adaptive RMS threshold."""
-
-    def __init__(self, config: VoiceConfig, frame_ms: int = FRAME_MS) -> None:
-        self.config = config
-        self.frame_ms = frame_ms
-        self.pre_roll: deque[np.ndarray] = deque(maxlen=max(1, 300 // frame_ms))
-        self.active_frames: list[np.ndarray] = []
-        self.start_frames = 0
-        self.speech_frames = 0
-        self.silent_frames = 0
-        self.noise_floor = 0.0
-        self.calibration_samples: list[float] = []
-        self.calibration_frames = max(0, config.calibration_ms // frame_ms)
-
-    @property
-    def calibrated(self) -> bool:
-        return self.calibration_frames == 0
-
-    @property
-    def effective_threshold(self) -> float:
-        adaptive = self.noise_floor * self.config.adaptive_noise_ratio
-        return max(float(self.config.speech_threshold), adaptive)
-
-    def push(
-        self,
-        frame: np.ndarray,
-        *,
-        threshold: float | None = None,
-        speech_start_ms: int | None = None,
-        update_noise_floor: bool = True,
-    ) -> np.ndarray | None:
-        rms = self._rms(frame)
-        if self.calibration_frames:
-            self.calibration_samples.append(rms)
-            self.calibration_frames -= 1
-            if self.calibration_frames == 0:
-                self.noise_floor = float(np.median(self.calibration_samples))
-                self.pre_roll.clear()
-            return None
-
-        speech_threshold = threshold if threshold is not None else self.effective_threshold
-        is_speech = rms >= speech_threshold
-        required_start_ms = (
-            speech_start_ms if speech_start_ms is not None else self.config.speech_start_ms
-        )
-
-        if not self.active_frames:
-            self.pre_roll.append(frame)
-            if not is_speech:
-                self.start_frames = 0
-                if update_noise_floor:
-                    self._update_noise_floor(rms)
-                return None
-            self.start_frames += 1
-            if self.start_frames * self.frame_ms < required_start_ms:
-                return None
-            self.active_frames = list(self.pre_roll)
-            self.pre_roll.clear()
-            self.speech_frames = self.start_frames
-            self.silent_frames = 0
-            return None
-
-        self.active_frames.append(frame)
-        if is_speech:
-            self.speech_frames += 1
-            self.silent_frames = 0
-        else:
-            self.silent_frames += 1
-
-        long_silence = self.silent_frames * self.frame_ms >= self.config.silence_ms
-        too_long = len(self.active_frames) * self.frame_ms >= (
-            self.config.max_utterance_seconds * 1000
-        )
-        if not long_silence and not too_long:
-            return None
-
-        enough_speech = self.speech_frames * self.frame_ms >= self.config.min_speech_ms
-        utterance = np.concatenate(self.active_frames) if enough_speech else None
-        self._reset_active()
-        return utterance
-
-    @staticmethod
-    def _rms(frame: np.ndarray) -> float:
-        samples = frame.astype(np.float32)
-        return float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
-
-    def _reset_active(self) -> None:
-        self.active_frames = []
-        self.start_frames = 0
-        self.speech_frames = 0
-        self.silent_frames = 0
-
-    def reset(self) -> None:
-        """Forget buffered speech while preserving the calibrated noise floor."""
-        self._reset_active()
-        self.pre_roll.clear()
-
-    def _update_noise_floor(self, rms: float) -> None:
-        if self.noise_floor == 0:
-            self.noise_floor = rms
-        else:
-            self.noise_floor = (self.noise_floor * 0.98) + (rms * 0.02)
 
 
 class PipeWireRecorder:

@@ -39,3 +39,13 @@ pace = 1.05
 sample_rate = 24000
 temperature = 0.6
 timeout_seconds = 30
+
+[vision]
+enabled = true
+# How long to wait for user approval (seconds).
+approval_timeout_seconds = 15
+# Command to send a desktop notification. {title} and {body} are substituted.
+notify_command = "notify-send -a nixi -i camera-webcam '{title}' '{body}'"
+# Command to capture the screen. Must output PNG to stdout.
+# Override this if grim is not available on your system.
+screenshot_command = "grim -"

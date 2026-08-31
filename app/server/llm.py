@@ -17,8 +17,9 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from app.config import ActionConfig, LLMConfig
+from app.config import ActionConfig, LLMConfig, VisionConfig
 from app.server.safety import CommandBlocked, validate_command
+from app.server.vision import request_and_capture
 from app.server.web_search import WebSearcher
 
 
@@ -131,6 +132,7 @@ class VertexChat:
         actions: dict[str, ActionConfig],
         request_id: str = "standalone",
         agentic_steps: list[dict[str, str]] | None = None,
+        vision_config: VisionConfig | None = None,
     ) -> tuple[str, ToolCall | None]:
         """
         Send user_message to the LLM with action function declarations.
@@ -227,6 +229,44 @@ class VertexChat:
                             role="user",
                             parts=[tool_result_part],
                         )
+                    )
+                    continue
+
+                # --- request_screenshot: capture screen with user approval ---
+                if tool_call.name == "request_screenshot":
+                    if not vision_config or not vision_config.enabled:
+                        screenshot_text = "Vision is not enabled."
+                    else:
+                        if agentic_steps is not None:
+                            agentic_steps.append({"command": "request_screenshot", "output": "waiting for approval"})
+                        image_bytes = request_and_capture(vision_config)
+                        if image_bytes is None:
+                            screenshot_text = "Screenshot denied by user or timed out."
+                        else:
+                            screenshot_text = "Screenshot captured successfully."
+
+                    fc_part = _extract_function_call_part(response)
+                    tool_result_part = self._types.Part.from_function_response(
+                        name="request_screenshot",
+                        response={"output": screenshot_text},
+                    )
+                    if image_bytes is not None:
+                        tool_result_part = self._types.Part.from_function_response(
+                            name="request_screenshot",
+                            response={"output": screenshot_text},
+                            parts=[
+                                self._types.FunctionResponsePart.from_bytes(
+                                    data=image_bytes,
+                                    mime_type="image/png",
+                                )
+                            ],
+                        )
+                    if fc_part is not None:
+                        request_messages.append(
+                            self._types.Content(role="model", parts=[fc_part])
+                        )
+                    request_messages.append(
+                        self._types.Content(role="user", parts=[tool_result_part])
                     )
                     continue
 
@@ -454,6 +494,22 @@ def _build_function_declarations(actions: dict[str, ActionConfig]) -> list[dict[
                 },
             },
             "required": ["command"],
+        },
+    })
+
+    # --- Built-in: request_screenshot (vision) ---
+    declarations.append({
+        "name": "request_screenshot",
+        "description": (
+            "Request permission to capture the user's screen. A notification will be "
+            "sent asking the user to approve. If approved, a screenshot is taken and "
+            "returned as an image you can analyze. Use this when the user asks you to "
+            "look at something, see their screen, identify what is on screen, help "
+            "with UI navigation, read error messages, or anything requiring visual context."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
         },
     })
 

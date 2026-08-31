@@ -100,6 +100,7 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
                 self.server.config.actions,
                 request_id=request_id,
                 agentic_steps=agentic_steps,
+                vision_config=self.server.config.vision,
             )
         except RuntimeError as error:
             self.server.console.llm_call(

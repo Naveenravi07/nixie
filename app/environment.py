@@ -10,7 +10,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def load_environment() -> None:
     """Load simple KEY=VALUE secrets without overriding the process environment."""
-    environment_file = REPO_ROOT / ".env"
+    from app.config import ensure_config_exists, USER_CONFIG_PATH
+    ensure_config_exists()
+
+    environment_file = USER_CONFIG_PATH.parent / ".env"
+    if not environment_file.exists():
+        environment_file = REPO_ROOT / ".env"
+
     if not environment_file.exists():
         return
 

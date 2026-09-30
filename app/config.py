@@ -19,6 +19,7 @@ from app.server.config import (
     default_config,
     load_config,
     resolve_config_path,
+    ensure_config_exists,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "default_config",
     "load_config",
     "resolve_config_path",
+    "ensure_config_exists",
 ]

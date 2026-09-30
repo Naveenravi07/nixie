@@ -10,13 +10,12 @@ from pathlib import Path
 from string import Formatter
 from typing import Any
 
-from app.config import ActionConfig
+from app.config import ActionConfig, USER_CONFIG_PATH
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
 
 # Paths
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_PROFILE_PATH = _REPO_ROOT / "config" / "nixi-profile.toml"
+_PROFILE_PATH = USER_CONFIG_PATH.parent / "nixi-profile.toml"
 
 # Directories searched in order as fallback when no profile is available
 _WALLPAPER_SEARCH_DIRS = [

@@ -24,7 +24,7 @@ try:
     gi.require_foreign("cairo")
 except ImportError as exc:
     raise SystemExit(
-        "nixi-popup needs the system PyCairo bindings. "
+        "nixii-popup needs the system PyCairo bindings. "
         "Install the distro package, for example: sudo pacman -S python-cairo"
     ) from exc
 gi.require_version("Gdk", "3.0")
@@ -129,8 +129,8 @@ class NixiPopup:
 
     def _build_window(self) -> Gtk.Window:
         window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
-        window.set_name("nixi-popup")
-        window.set_title("Nixi")
+        window.set_name("nixii-popup")
+        window.set_title("Nixii")
         window.set_decorated(False)
         window.set_resizable(False)
         window.set_keep_above(True)
@@ -143,7 +143,7 @@ class NixiPopup:
 
         if self.runtime.use_layer_shell:
             GtkLayerShell.init_for_window(window)
-            GtkLayerShell.set_namespace(window, "nixi")
+            GtkLayerShell.set_namespace(window, "nixii")
             GtkLayerShell.set_layer(window, GtkLayerShell.Layer.OVERLAY)
             GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.BOTTOM, True)
             GtkLayerShell.set_margin(window, GtkLayerShell.Edge.BOTTOM, POPUP_MARGIN_BOTTOM)
@@ -306,7 +306,7 @@ class LoopingVideo(Gtk.DrawingArea):
         )
         self.thread = threading.Thread(
             target=self._read_frames,
-            name="nixi-popup-video",
+            name="nixii-popup-video",
             daemon=True,
         )
         self.thread.start()
@@ -373,7 +373,7 @@ class LoopingVideo(Gtk.DrawingArea):
 def load_css() -> None:
     css = b"""
     window { color: #f5f2eb; font: 11pt Sans; }
-    #nixi-popup { background: transparent; }
+    #nixii-popup { background: transparent; }
     """
     provider = Gtk.CssProvider()
     provider.load_from_data(css)

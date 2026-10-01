@@ -36,7 +36,7 @@ class NixiRequestHandler(BaseHTTPRequestHandler):
         if not self._begin_request():
             return
         if self.path == "/health":
-            self._send_json({"ok": True, "service": "nixi-server"})
+            self._send_json({"ok": True, "service": "nixii-server"})
             return
 
         if self.path == "/actions":
@@ -297,8 +297,8 @@ class NixiHTTPServer(ThreadingHTTPServer):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the local Nixi server.")
-    parser.add_argument("--config", type=Path, help="path to nixi.toml")
+    parser = argparse.ArgumentParser(description="Run the local Nixii server.")
+    parser.add_argument("--config", type=Path, help="path to nixii.toml")
     parser.add_argument("--host", help="override configured host")
     parser.add_argument("--port", type=int, help="override configured port")
     parser.add_argument(
@@ -306,7 +306,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Probe the desktop environment, scan script directories, and "
-            "auto-generate the [actions] block in nixi.toml, then exit."
+            "auto-generate the [actions] block in nixii.toml, then exit."
         ),
     )
     return parser.parse_args()
@@ -314,6 +314,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     load_environment()
+    
+    # Friendly first-run check for API keys
+    import os, sys
+    if not os.environ.get("GOOGLE_CLOUD_API_KEY", "").strip():
+        print("\n" + "="*65)
+        print(" Welcome to Nixii! ".center(65, "*"))
+        print("="*65)
+        print("I've initialized your configuration directory at:")
+        print("  ~/.config/nixii/\n")
+        print("Please configure your Vertex AI API key in your .env file:")
+        print("  ~/.config/nixii/.env\n")
+        print("Add the following line:")
+        print("  GOOGLE_CLOUD_API_KEY=your_vertex_express_mode_key")
+        print("="*65 + "\n")
+        sys.exit(0)
+
     args = parse_args()
 
     if args.discover:
@@ -337,7 +353,7 @@ def main() -> None:
     try:
         server = NixiHTTPServer(config)
     except RuntimeError as error:
-        raise SystemExit(f"nixi-server: {error}") from None
+        raise SystemExit(f"nixii-server: {error}") from None
     server.console.startup(
         host=config.server.host,
         port=config.server.port,

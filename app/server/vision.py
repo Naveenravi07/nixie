@@ -10,7 +10,7 @@ from pathlib import Path
 from app.config import VisionConfig
 
 
-_APPROVAL_DIR = Path(tempfile.gettempdir()) / "nixi-vision"
+_APPROVAL_DIR = Path(tempfile.gettempdir()) / "nixii-vision"
 _APPROVAL_FILE = _APPROVAL_DIR / "approved"
 
 
@@ -35,8 +35,8 @@ def request_and_capture(config: VisionConfig) -> bytes | None:
 
 
 def _send_notification(config: VisionConfig) -> None:
-    title = "Nixi wants to see your screen"
-    body = "Run  uv run nixi-approve  to approve."
+    title = "Nixii wants to see your screen"
+    body = "Run  nixii-approve  to approve."
     cmd = config.notify_command.format(title=title, body=body)
     try:
         subprocess.run(cmd, shell=True, check=False, timeout=5)

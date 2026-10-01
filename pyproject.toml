@@ -1,6 +1,6 @@
 [project]
-name = "nixi"
-version = "0.1.0"
+name = "nixii"
+version = "0.1.1"
 description = "Local voice-command assistant for Linux"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -16,10 +16,10 @@ dependencies = [
 ]
 
 [project.scripts]
-nixi-popup = "app.popup.launcher:main"
-nixi-server = "app.server.main:main"
-nixi-voice = "app.voice.main:main"
-nixi-approve = "app.server.approve_cli:main"
+nixii-popup = "app.popup.launcher:main"
+nixii-server = "app.server.main:main"
+nixii-voice = "app.voice.main:main"
+nixii-approve = "app.server.approve_cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12"]

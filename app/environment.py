@@ -29,7 +29,7 @@ def load_environment() -> None:
             if name and value:
                 os.environ.setdefault(name, value)
 
-    # 1. Load from ~/.config/nixi/.env first (user overrides)
+    # 1. Load from ~/.config/nixii/.env first (user overrides)
     load_from_file(USER_CONFIG_PATH.parent / ".env")
 
     # 2. Fall back to REPO_ROOT / ".env" (local development)

@@ -51,7 +51,7 @@ class PipeWireRecorder:
 
         self.thread = threading.Thread(
             target=self._capture,
-            name="nixi-microphone",
+            name="nixii-microphone",
             daemon=True,
         )
         self.thread.start()

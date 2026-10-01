@@ -15,7 +15,7 @@ from app.config import ActionConfig, USER_CONFIG_PATH
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
 
 # Paths
-_PROFILE_PATH = USER_CONFIG_PATH.parent / "nixi-profile.toml"
+_PROFILE_PATH = USER_CONFIG_PATH.parent / "nixii-profile.toml"
 
 # Directories searched in order as fallback when no profile is available
 _WALLPAPER_SEARCH_DIRS = [
@@ -28,10 +28,10 @@ _WALLPAPER_SEARCH_DIRS = [
 
 def _find_random_wallpaper() -> str | None:
     """
-    Read from nixi-profile.toml's wallpaper file list if available.
+    Read from nixii-profile.toml's wallpaper file list if available.
     Otherwise, scan well-known picture directories as fallback.
     """
-    # 1. Try reading from discovered wallpapers in nixi-profile.toml
+    # 1. Try reading from discovered wallpapers in nixii-profile.toml
     if _PROFILE_PATH.exists():
         try:
             with _PROFILE_PATH.open("rb") as f:

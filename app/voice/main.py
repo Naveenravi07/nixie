@@ -73,13 +73,13 @@ class NixiVoiceDaemon:
                 except Exception as e:
                     print(f"Trigger server error: {e}", file=sys.stderr)
         
-        t = threading.Thread(target=server_loop, daemon=True, name="nixi-trigger-server")
+        t = threading.Thread(target=server_loop, daemon=True, name="nixii-trigger-server")
         t.start()
 
     def run(self) -> None:
         self.recorder.start()
         print(
-            "Nixi trigger listener ready. Use the Google command/shortcut to start/stop recording.",
+            "Nixii trigger listener ready. Use the Google command/shortcut to start/stop recording.",
             flush=True,
         )
         try:
@@ -162,6 +162,8 @@ class NixiVoiceDaemon:
             "you may leave now",
             "close now",
             "stop listening",
+            "exit nixii",
+            "exit nixie",
             "exit nixi",
             "quit",
             "exit",
@@ -256,8 +258,8 @@ class NixiVoiceDaemon:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the always-on local Nixi voice daemon.")
-    parser.add_argument("--config", type=Path, help="path to nixi.toml")
+    parser = argparse.ArgumentParser(description="Run the always-on local Nixii voice daemon.")
+    parser.add_argument("--config", type=Path, help="path to nixii.toml")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("trigger", help="Send a trigger to the running voice daemon")
     sub.add_parser("new", help="Create a new session and trigger the voice daemon")
@@ -285,10 +287,26 @@ def main() -> None:
             sys.exit(1)
 
     load_environment()
+
+    # Friendly first-run check for API keys
+    import os, sys
+    if not os.environ.get("SARVAM_API_KEY", "").strip():
+        print("\n" + "="*65)
+        print(" Nixii Voice Daemon ".center(65, "*"))
+        print("="*65)
+        print("I've initialized your configuration directory at:")
+        print("  ~/.config/nixii/\n")
+        print("Please configure your Sarvam API key in your .env file:")
+        print("  ~/.config/nixii/.env\n")
+        print("Add the following line:")
+        print("  SARVAM_API_KEY=your_sarvam_key")
+        print("="*65 + "\n")
+        sys.exit(0)
+
     try:
         daemon = NixiVoiceDaemon(args.config)
     except RuntimeError as error:
-        raise SystemExit(f"nixi-voice: {error}") from error
+        raise SystemExit(f"nixii-voice: {error}") from error
 
     signal.signal(signal.SIGINT, daemon.stop)
     signal.signal(signal.SIGTERM, daemon.stop)

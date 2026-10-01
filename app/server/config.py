@@ -10,8 +10,8 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "example_config" / "nixi.toml"
-USER_CONFIG_PATH = Path.home() / ".config" / "nixi" / "nixi.toml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "example_config" / "nixii.toml"
+USER_CONFIG_PATH = Path.home() / ".config" / "nixii" / "nixii.toml"
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -98,7 +98,7 @@ class TTSConfig:
 class VisionConfig:
     enabled: bool = True
     approval_timeout_seconds: float = 15.0
-    notify_command: str = "notify-send -a nixi -i camera-webcam '{title}' '{body}'"
+    notify_command: str = "notify-send -a nixii -i camera-webcam '{title}' '{body}'"
     screenshot_command: str = "grim -"
 
 
@@ -140,11 +140,11 @@ def default_config() -> NixiConfig:
 
 
 def ensure_config_exists() -> None:
-    """Ensure ~/.config/nixi/ exists and has a default nixi.toml and .env."""
+    """Ensure ~/.config/nixii/ exists and has a default nixii.toml and .env."""
     if not USER_CONFIG_PATH.exists():
         try:
             USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            default_toml = """agent_name = "Nixi"
+            default_toml = """agent_name = "Nixii"
 
 [server]
 host = "127.0.0.1"
@@ -191,7 +191,7 @@ enabled = true
 # How long to wait for user approval (seconds).
 approval_timeout_seconds = 15
 # Command to send a desktop notification. {title} and {body} are substituted.
-notify_command = "notify-send -a nixi -i camera-webcam '{title}' '{body}'"
+notify_command = "notify-send -a nixii -i camera-webcam '{title}' '{body}'"
 # Command to capture the screen. Must output PNG to stdout.
 # Override this if grim is not available on your system.
 screenshot_command = "grim -"
@@ -214,14 +214,14 @@ SARVAM_API_KEY=
 
 
 def resolve_config_path(path: Path | None = None) -> Path:
-    """Resolve which nixi.toml to use.
+    """Resolve which nixii.toml to use.
 
-    Order: explicit path > NIXI_CONFIG env > ~/.config/nixi/nixi.toml > auto-initialized config.
+    Order: explicit path > NIXII_CONFIG env > ~/.config/nixii/nixii.toml > auto-initialized config.
     """
     if path is not None:
         return path
-    if os.environ.get("NIXI_CONFIG"):
-        return Path(os.environ["NIXI_CONFIG"])
+    if os.environ.get("NIXII_CONFIG"):
+        return Path(os.environ["NIXII_CONFIG"])
     
     ensure_config_exists()
     return USER_CONFIG_PATH

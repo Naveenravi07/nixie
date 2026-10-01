@@ -16,61 +16,70 @@ screenshot, control media, or answer general queries using Gemini.
 - **Voice interaction** — manual trigger-to-record mechanism, speech-to-text,
   and text-to-speech. No constant background listening/wake-word overhead.
 
-## Setup
+## Installation & Setup
 
-Install [uv](https://docs.astral.sh/uv/) and sync dependencies:
+### Option 1: Global Installation (Recommended)
 
-```sh
-uv sync
-```
-
-Copy the environment template and add your API keys:
+Install Nixi globally on your system using [pipx](https://github.com/pypa/pipx):
 
 ```sh
-cp .env.example .env
+pipx install git+https://github.com/your-username/nixi.git
 ```
+
+This will automatically expose the commands globally. Run any command once to automatically initialize your configuration directory:
+
+```sh
+nixi-server
+```
+
+Now, configure your API keys by editing `~/.config/nixi/.env`:
 
 ```dotenv
 GOOGLE_CLOUD_API_KEY=your-vertex-express-mode-key
 SARVAM_API_KEY=your-sarvam-key
 ```
 
-Copy the example config and customize it:
+### Option 2: Local Development Setup
+
+If you'd like to run or develop Nixi locally, install [uv](https://docs.astral.sh/uv/) and sync dependencies:
 
 ```sh
-mkdir -p ~/.config/nixi
-cp example_config/nixi.toml ~/.config/nixi/nixi.toml
+uv sync
 ```
 
+Run any command once (e.g. `uv run nixi-server`) to auto-generate your config, then add your API keys to `~/.config/nixi/.env`.
+
 ## Run
+
+> **Note:** If you are using the local development setup, prefix all of the following commands with `uv run ` (e.g., `uv run nixi-server`).
 
 First, discover your desktop environment (keybinds, scripts, wallpapers):
 
 ```sh
-uv run nixi-server --discover
+nixi-server --discover
 ```
 
 Then start the server:
 
 ```sh
-uv run nixi-server
+nixi-server
 ```
 
 Next, start the voice daemon (which runs as a background process listening for manual trigger events):
 
 ```sh
-uv run nixi-voice
+nixi-voice
 ```
 
 To interact with Nixi, trigger the recording. You can bind keys or desktop shortcuts to run these commands:
 
 - **Trigger Recording (Toggle)**: Start or stop recording your query.
   ```sh
-  uv run nixi-voice trigger
+  nixi-voice trigger
   ```
 - **New Session**: Start a fresh conversation session and trigger recording.
   ```sh
-  uv run nixi-voice new
+  nixi-voice new
   ```
 
 Run the command once to start recording, speak your request, and run it again to stop and process the audio!

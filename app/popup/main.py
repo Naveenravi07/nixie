@@ -43,10 +43,10 @@ POPUP_WIDTH = 250
 POPUP_HEIGHT = 96
 POPUP_MARGIN_BOTTOM = 24
 POPUP_RADIUS = 16
-REPO_ROOT = Path(__file__).resolve().parents[2]
-AVATAR_GIF = REPO_ROOT / "assets" / "eyesv2.gif"
-AVATAR_SVG = REPO_ROOT / "assets" / "Q19WSHi0PH.svg"
-AVATAR_VIDEO = REPO_ROOT / "assets" / "110371-688648556_medium.mp4"
+MODULE_ROOT = Path(__file__).resolve().parents[1]
+AVATAR_GIF = MODULE_ROOT / "assets" / "eyesv2.gif"
+AVATAR_SVG = MODULE_ROOT / "assets" / "Q19WSHi0PH.svg"
+AVATAR_VIDEO = MODULE_ROOT / "assets" / "110371-688648556_medium.mp4"
 
 
 @dataclass(frozen=True)

@@ -139,18 +139,92 @@ def default_config() -> NixiConfig:
     )
 
 
+def ensure_config_exists() -> None:
+    """Ensure ~/.config/nixi/ exists and has a default nixi.toml and .env."""
+    if not USER_CONFIG_PATH.exists():
+        try:
+            USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            default_toml = """agent_name = "Nixi"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[voice]
+sample_rate = 16000
+command_timeout_seconds = 8
+# Set this to a PipeWire node id or name to override the default microphone.
+microphone_target = ""
+
+[llm]
+model = "gemini-3.5-flash-lite"
+max_tokens = 1024
+thinking_level = "minimal"
+timeout_seconds = 30
+history_turns = 8
+# Allow Vertex AI to ground time-sensitive questions with Google Search.
+google_search_enabled = true
+
+[stt]
+enabled = true
+model = "saaras:v3-realtime"
+language = "en-IN"
+mode = "transcribe"
+stream_type = "fast"
+threshold = 0.3
+silence_ms = 500
+min_speech_ms = 250
+timeout_seconds = 15
+
+[tts]
+enabled = true
+model = "bulbul:v3"
+language = "en-IN"
+speaker = "shubh"
+pace = 1.05
+sample_rate = 24000
+temperature = 0.6
+timeout_seconds = 30
+
+[vision]
+enabled = true
+# How long to wait for user approval (seconds).
+approval_timeout_seconds = 15
+# Command to send a desktop notification. {title} and {body} are substituted.
+notify_command = "notify-send -a nixi -i camera-webcam '{title}' '{body}'"
+# Command to capture the screen. Must output PNG to stdout.
+# Override this if grim is not available on your system.
+screenshot_command = "grim -"
+"""
+            USER_CONFIG_PATH.write_text(default_toml, encoding="utf-8")
+            print(f"Created default configuration file: {USER_CONFIG_PATH}")
+        except Exception as e:
+            print(f"Warning: Could not create default config: {e}")
+
+    env_path = USER_CONFIG_PATH.parent / ".env"
+    if not env_path.exists():
+        try:
+            default_env = """GOOGLE_CLOUD_API_KEY=
+SARVAM_API_KEY=
+"""
+            env_path.write_text(default_env, encoding="utf-8")
+            print(f"Created template environment file: {env_path}")
+        except Exception as e:
+            print(f"Warning: Could not create template env file: {e}")
+
+
 def resolve_config_path(path: Path | None = None) -> Path:
     """Resolve which nixi.toml to use.
 
-    Order: explicit path > NIXI_CONFIG env > ~/.config/nixi/nixi.toml > repo default.
+    Order: explicit path > NIXI_CONFIG env > ~/.config/nixi/nixi.toml > auto-initialized config.
     """
     if path is not None:
         return path
     if os.environ.get("NIXI_CONFIG"):
         return Path(os.environ["NIXI_CONFIG"])
-    if USER_CONFIG_PATH.exists():
-        return USER_CONFIG_PATH
-    return DEFAULT_CONFIG_PATH
+    
+    ensure_config_exists()
+    return USER_CONFIG_PATH
 
 
 def load_config(path: Path | None = None) -> NixiConfig:
